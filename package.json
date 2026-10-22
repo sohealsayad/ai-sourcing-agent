@@ -1,0 +1,15 @@
+{
+  "name": "ai-sourcing-agent",
+  "private": true,
+  "version": "0.1.0",
+  "description": "AI procurement workflow: find suppliers, send proposals, negotiate the best deal",
+  "scripts": {
+    "install:all": "npm install && npm install --prefix server && npm install --prefix client",
+    "db:setup": "npm run db:setup --prefix server",
+    "dev": "concurrently -n server,client -c blue,magenta \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "build": "npm run build --prefix client"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

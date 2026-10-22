@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.log
+
+# Secrets: real env files and any backups; keep the example
+.env
+.env.*
+!.env.example
