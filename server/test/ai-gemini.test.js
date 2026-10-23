@@ -9,11 +9,15 @@ process.env.GEMINI_API_KEY = 'test-gemini-key';
 process.env.GEMINI_MODEL = 'gemini-test-model';
 process.env.EMAIL_TRANSPORT = 'simulated';
 process.env.INBOUND_PROVIDER = 'none';
+// Default here: Gemini's own Google Search grounding. Tavily tests switch it per test.
+process.env.SEARCH_PROVIDER = 'gemini';
+process.env.TAVILY_API_KEY = 'tvly-test-key';
 
-const { buildConfig } = await import('../src/config.js');
+const { buildConfig, config } = await import('../src/config.js');
 const { completeJson, completeWithWebSearch, setAiFetch } = await import('../src/services/ai.js');
-const { findSuppliers } = await import('../src/services/discovery.js');
+const { buildSearchQueries, findSuppliers } = await import('../src/services/discovery.js');
 const { parseReply } = await import('../src/services/replyParser.js');
+const { setSearchFetch } = await import('../src/services/webSearch.js');
 
 /** Records requests and answers with a Gemini generateContent response. */
 function fakeGemini(respond) {
@@ -34,7 +38,11 @@ const textResponse = (text, extra = {}) => ({
   },
 });
 
-afterEach(() => setAiFetch());
+afterEach(() => {
+  setAiFetch();
+  setSearchFetch();
+  config.search.provider = 'gemini';
+});
 
 describe('AI provider config', () => {
   const BASE = { DATABASE_URL: 'postgres://x/y' };
@@ -43,7 +51,7 @@ describe('AI provider config', () => {
     const cfg = buildConfig({ ...BASE, AI_PROVIDER: 'gemini', GEMINI_API_KEY: 'k' });
     assert.equal(cfg.ai.provider, 'gemini');
     assert.equal(cfg.ai.mode, 'live', 'a key turns live mode on by default');
-    assert.equal(cfg.ai.gemini.model, 'gemini-2.5-flash');
+    assert.equal(cfg.ai.gemini.model, 'gemini-3.5-flash');
     assert.equal(buildConfig({ ...BASE, GEMINI_API_KEY: 'k' }).ai.provider, 'gemini');
   });
 
@@ -131,5 +139,143 @@ describe('Gemini calls', () => {
     const parsed = await parseReply('Price: INR 16,500.00 per tonne\nDelivery: within 10 days', { currency: 'INR' });
     assert.equal(parsed.parser, 'rules');
     assert.equal(parsed.unit_price, 16500);
+  });
+
+  test('retired models and bad keys are permanent errors (no pointless retries)', async () => {
+    fakeGemini(() => ({ status: 404, json: { error: { message: 'This model is no longer available to new users.' } } }));
+    await assert.rejects(completeJson({ prompt: 'x' }), (err) => err.permanent === true && /HTTP 404/.test(err.message));
+    fakeGemini(() => ({ status: 429, json: {} }));
+    await assert.rejects(completeJson({ prompt: 'x' }), (err) => !err.permanent);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tavily search + Gemini
+
+const REQUEST = {
+  commodity: 'Refined Sunflower Oil',
+  specifications: 'Food-grade, sealed 15-litre containers',
+  location: 'Hyderabad, Telangana, India',
+  quantity: 5000,
+  unit: 'kg',
+};
+
+/** Fake Tavily: answers per query; `fail(query)` can return { status, json } to simulate errors. */
+function fakeTavily(resultsFor, fail = () => null) {
+  const calls = [];
+  setSearchFetch(async (url, opts) => {
+    const body = JSON.parse(opts.body);
+    calls.push({ url, headers: opts.headers, body });
+    const error = fail(body.query);
+    if (error) return { ok: false, status: error.status, json: async () => error.json ?? {} };
+    return { ok: true, status: 200, json: async () => ({ query: body.query, results: resultsFor(body.query) }) };
+  });
+  return calls;
+}
+
+const SEARCH_RESULTS = [
+  { title: 'Natraj Oil Mills - Sunflower Oil Hyderabad', url: 'https://www.natrajoil.com', content: 'Sri Sarwo Natraj Agro, refined sunflower oil manufacturer in Hyderabad. Bulk supply.' },
+  { title: 'Gemini Edibles & Fats', url: 'https://www.geminiedibles.com', content: 'Freedom refined sunflower oil, Hyderabad, Telangana.' },
+  { title: 'Kernel Holding SA stock', url: 'https://www.cnbc.com/quotes/KARNF', content: 'Stock quote.' },
+];
+
+describe('supplier search with Tavily + Gemini', () => {
+  test('builds three search queries from the request', () => {
+    const queries = buildSearchQueries(REQUEST);
+    assert.equal(queries.length, 3);
+    assert.match(queries[0], /Refined Sunflower Oil supplier Hyderabad, Telangana, India contact email/);
+    assert.match(queries[2], /Food-grade distributor India$/);
+  });
+
+  test('searches with Tavily, lets Gemini pick suppliers from the results, and finds emails on their own domain', async () => {
+    config.search.provider = 'tavily';
+    const tavily = fakeTavily((query) =>
+      query.includes('"Natraj Oil Mills"')
+        ? [{ title: 'Contact us', url: 'https://www.natrajoil.com/contact', content: 'Write to sales@natrajoil.com or info@gmail.com' }]
+        : query.includes('"Gemini Edibles"')
+          ? [{ title: 'Directory', url: 'https://directory.example', content: 'contact: someone@otherdomain.com' }]
+          : SEARCH_RESULTS,
+    );
+    const gemini = fakeGemini(() =>
+      textResponse(
+        JSON.stringify({
+          suppliers: [
+            { name: 'Natraj Oil Mills', website: 'https://www.natrajoil.com', email: null, relevance_score: 90, reasoning: 'Hyderabad manufacturer', source_url: 'https://www.natrajoil.com' },
+            { name: 'Gemini Edibles & Fats', website: 'https://www.geminiedibles.com', email: null, relevance_score: 80, reasoning: 'Freedom brand', source_url: 'https://www.geminiedibles.com' },
+          ],
+        }),
+      ),
+    );
+
+    const result = await findSuppliers(REQUEST);
+
+    // Three discovery searches, sent with the Tavily key; duplicates across queries are merged.
+    const discovery = tavily.filter((c) => !c.body.query.includes('"'));
+    assert.equal(discovery.length, 3);
+    assert.equal(discovery[0].headers.Authorization, 'Bearer tvly-test-key');
+    assert.equal(discovery[0].url, 'https://api.tavily.com/search');
+
+    // Gemini gets one plain call (no Google Search tool) containing the deduplicated results.
+    assert.equal(gemini.length, 1);
+    assert.equal(gemini[0].body.tools, undefined);
+    assert.equal(gemini[0].body.generationConfig.responseMimeType, 'application/json');
+    const prompt = gemini[0].body.contents[0].parts[0].text;
+    assert.equal(prompt.match(/URL: https:\/\/www\.natrajoil\.com\n/g).length, 1, 'each result appears once');
+    assert.match(prompt, /Use ONLY these results/);
+
+    assert.equal(result.mode, 'live');
+    assert.equal(result.suppliers.length, 2);
+    assert.equal(result.suppliers[0].email, 'sales@natrajoil.com', 'email accepted only on the supplier’s own domain');
+    assert.equal(result.suppliers[1].email, null, 'an address on another domain is never used');
+    assert.ok(result.searchQueries.length >= 3);
+  });
+
+  test('falls back to AI knowledge (marked unverified) when Tavily is out of quota', async () => {
+    config.search.provider = 'tavily';
+    fakeTavily(() => [], () => ({ status: 432, json: { detail: { error: 'Plan usage limit exceeded' } } }));
+    fakeGemini(() =>
+      textResponse(JSON.stringify({ suppliers: [{ name: 'Ruchi Soya', website: 'https://www.ruchisoya.com', relevance_score: 70, reasoning: 'Large edible oil maker' }] })),
+    );
+    const result = await findSuppliers(REQUEST);
+    assert.equal(result.mode, 'live-unverified');
+    assert.match(result.searchError, /Tavily quota or rate limit reached \(HTTP 432\): Plan usage limit exceeded/);
+    assert.match(result.suppliers[0].reasoning, /^Not web-verified: /);
+  });
+
+  test('a rejected Tavily key fails clearly instead of guessing', async () => {
+    config.search.provider = 'tavily';
+    fakeTavily(() => [], () => ({ status: 401, json: { detail: { error: 'Unauthorized: missing or invalid API key.' } } }));
+    await assert.rejects(findSuppliers(REQUEST), (err) => err.permanent === true && /check TAVILY_API_KEY/.test(err.message));
+  });
+
+  test('without any search provider, Gemini suggests suppliers from its knowledge only', async () => {
+    config.search.provider = 'none';
+    const gemini = fakeGemini(() => textResponse(JSON.stringify({ suppliers: [{ name: 'Known Oils Ltd', website: 'https://knownoils.example', relevance_score: 60 }] })));
+    const result = await findSuppliers(REQUEST);
+    assert.equal(result.mode, 'live-unverified');
+    assert.equal(gemini[0].body.tools, undefined);
+    assert.match(gemini[0].body.contents[0].parts[0].text, /You cannot browse the web/);
+  });
+
+  test('search provider config: defaults and validation', () => {
+    const BASE = { DATABASE_URL: 'postgres://x/y', AI_PROVIDER: 'gemini', GEMINI_API_KEY: 'k' };
+    assert.equal(buildConfig({ ...BASE, TAVILY_API_KEY: 'tvly-1' }).search.provider, 'tavily');
+    assert.equal(buildConfig(BASE).search.provider, 'none');
+    assert.throws(() => buildConfig({ ...BASE, SEARCH_PROVIDER: 'tavily' }), /SEARCH_PROVIDER=tavily requires TAVILY_API_KEY/);
+    assert.throws(() => buildConfig({ ...BASE, SEARCH_PROVIDER: 'bing' }), /SEARCH_PROVIDER must be one of tavily, gemini, none/);
+  });
+});
+
+describe('job retries', () => {
+  test('a permanent error ends the job on the first attempt; others are retried', async () => {
+    const { handle } = await import('../src/workflow/worker.js');
+    const finals = [];
+    const run = (err) => handle('test-job', async () => { throw err; }, async (_job, e) => finals.push(e.message))([{ id: 'j1', data: {}, retryCount: 0, retryLimit: 2 }]);
+
+    await run(Object.assign(new Error('model retired'), { permanent: true }));
+    assert.deepEqual(finals, ['model retired'], 'failed immediately, no retry');
+
+    await assert.rejects(run(new Error('temporary outage')), /temporary outage/);
+    assert.equal(finals.length, 1, 'a temporary error is rethrown for pg-boss to retry');
   });
 });

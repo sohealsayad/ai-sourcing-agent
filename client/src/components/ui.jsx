@@ -70,6 +70,58 @@ const ICONS = {
     </>
   ),
   chevronDown: <path d="m6 9 6 6 6-6" />,
+  users: (
+    <>
+      <circle cx="9" cy="8" r="3.5" />
+      <path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M21.5 20a6.5 6.5 0 0 0-4-6" />
+    </>
+  ),
+  receipt: (
+    <>
+      <path d="M5 3h14v18l-3-2-2 2-2-2-2 2-2-2-3 2V3Z" />
+      <path d="M9 8h6M9 12h6" />
+    </>
+  ),
+  messages: (
+    <>
+      <path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.5A8 8 0 1 1 21 12Z" />
+      <path d="M9 11h.01M12 11h.01M15 11h.01" />
+    </>
+  ),
+  settings: (
+    <>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" />
+    </>
+  ),
+  shield: <path d="M12 3 4 6v6c0 4.5 3.4 8.4 8 9 4.6-.6 8-4.5 8-9V6l-8-3Z" />,
+  panelLeft: (
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M9 4v16" />
+    </>
+  ),
+  chevronsLeft: <path d="m11 17-5-5 5-5m7 10-5-5 5-5" />,
+  chevronsRight: <path d="m13 17 5-5-5-5M6 17l5-5-5-5" />,
+  list: <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />,
+  filePlus: (
+    <>
+      <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6Z" />
+      <path d="M14 3v6h6M12 12v6m-3-3h6" />
+    </>
+  ),
+  globe: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
+    </>
+  ),
+  eye: (
+    <>
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" />
+      <circle cx="12" cy="12" r="3" />
+    </>
+  ),
   sparkles: <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3ZM19 17l.9 2.1L22 20l-2.1.9L19 23l-.9-2.1L16 20l2.1-.9L19 17Z" />,
 };
 
@@ -125,15 +177,24 @@ export function CardHeader({ title, description, actions, icon }) {
   );
 }
 
-export function StatCard({ label, value, hint, icon, tone = 'slate' }) {
+/** KPI card. With `onClick` it becomes a button (e.g. to filter a list); `active` highlights it. */
+export function StatCard({ label, value, hint, icon, tone = 'slate', onClick, active = false }) {
   const tones = {
     slate: 'bg-slate-100 text-slate-600',
     brand: 'bg-brand-50 text-brand-600',
     amber: 'bg-amber-50 text-amber-600',
     emerald: 'bg-emerald-50 text-emerald-600',
   };
+  const Tag = onClick ? 'button' : 'div';
   return (
-    <div className="card p-5">
+    <Tag
+      {...(onClick && { type: 'button', onClick, 'aria-pressed': active })}
+      className={`card p-5 text-left ${
+        onClick
+          ? 'cursor-pointer transition hover:border-slate-300 hover:shadow-elevated focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:outline-none'
+          : ''
+      } ${active ? 'ring-2 ring-brand-500' : ''}`}
+    >
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium text-slate-500">{label}</p>
         {icon && (
@@ -144,7 +205,7 @@ export function StatCard({ label, value, hint, icon, tone = 'slate' }) {
       </div>
       <p className="tabular mt-3 text-2xl font-semibold tracking-tight text-slate-900">{value}</p>
       {hint && <p className="mt-1 text-xs text-slate-500">{hint}</p>}
-    </div>
+    </Tag>
   );
 }
 

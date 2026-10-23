@@ -1,10 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '../api.js';
+import AllowlistPanel from '../components/AllowlistPanel.jsx';
 import ApprovalPanel from '../components/ApprovalPanel.jsx';
 import QuoteComparison from '../components/QuoteComparison.jsx';
 import StatusBadge from '../components/StatusBadge.jsx';
+import SupplierPanel from '../components/SupplierPanel.jsx';
 import SupplierTable from '../components/SupplierTable.jsx';
 import Timeline from '../components/Timeline.jsx';
 import { CardHeader, EmptyState, ErrorState, Icon, Notice, PageHeader, Skeleton, Spinner } from '../components/ui.jsx';
@@ -60,12 +62,20 @@ function LoadingDetail() {
   );
 }
 
-/** Adds a supplier by hand, e.g. a Temp Mail test address. */
-function AddSupplierForm({ requestId, onAdded }) {
+/**
+ * Adds a supplier by hand, e.g. a Temp Mail test address. With real email, ticking
+ * "Allow sending" approves the address in the same step (that tick is the explicit approval).
+ */
+function AddSupplierForm({ requestId, realEmail, onAdded, onAllow }) {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
+  const [allow, setAllow] = useState(true);
   const add = useMutation({
-    mutationFn: () => api.addSupplier(requestId, { name: name.trim(), email: email.trim() }),
+    mutationFn: async () => {
+      const address = email.trim();
+      if (realEmail && allow) await api.allowRecipient(address, requestId);
+      return { ...(await api.addSupplier(requestId, { name: name.trim(), email: address })), email: address };
+    },
     onSuccess: (res) => {
       setName('');
       setEmail('');
@@ -73,6 +83,7 @@ function AddSupplierForm({ requestId, onAdded }) {
     },
   });
   const fieldError = add.error?.fields && Object.values(add.error.fields)[0];
+  const addedBlocked = add.isSuccess && add.data.can_email === false;
 
   return (
     <form
@@ -97,10 +108,21 @@ function AddSupplierForm({ requestId, onAdded }) {
           {add.isPending ? <Spinner /> : <Icon name="plus" />}
           {add.isPending ? 'Adding…' : 'Add'}
         </button>
+        {realEmail && (
+          <label className="ml-1 flex items-center gap-1.5 text-xs font-medium text-slate-600" title="Real emails will be sent to this address">
+            <input type="checkbox" className="size-4 accent-brand-600" checked={allow} onChange={(e) => setAllow(e.target.checked)} />
+            Allow sending to this address
+          </label>
+        )}
       </div>
       {add.isError && <p className="field-error">{fieldError ?? add.error.message}</p>}
-      {add.isSuccess && add.data.can_email === false && (
-        <p className="mt-1.5 text-xs font-medium text-amber-700">Added, but this address is not in EMAIL_ALLOWED_RECIPIENTS, so it can't be emailed.</p>
+      {addedBlocked && (
+        <p className="mt-1.5 flex items-center gap-2 text-xs font-medium text-amber-700">
+          Added, but this address is not approved for real email yet.
+          <button type="button" className="font-semibold text-brand-700 hover:underline" onClick={async () => (await onAllow(add.data.email, add.data.id)) && add.reset()}>
+            Allow it now
+          </button>
+        </p>
       )}
     </form>
   );
@@ -111,6 +133,10 @@ export default function RequestDetail() {
   const queryClient = useQueryClient();
   // null = untouched, which means "every supplier with an email".
   const [selection, setSelection] = useState(null);
+  // Supplier shown in the side panel (request_suppliers id), or null when closed.
+  const [panelId, setPanelId] = useState(null);
+  const closePanel = useCallback(() => setPanelId(null), []);
+  const [showAllowlist, setShowAllowlist] = useState(false);
 
   const { data: r, isLoading, error, refetch } = useQuery({
     queryKey: ['request', id],
@@ -134,8 +160,36 @@ export default function RequestDetail() {
 
   const sendProposals = useMutation({
     mutationFn: (ids) => api.sendProposals(id, ids),
+    onSuccess: () => setSelection(null),
     onSettled: refresh,
   });
+
+  // Real email only: approve an address from the UI after an explicit confirmation.
+  const allowEmail = useCallback(
+    async (email, threadId) => {
+      if (!window.confirm(`Real emails will be sent to ${email}.\n\nAllow sending to this address?`)) return false;
+      await api.allowRecipient(email, id);
+      if (threadId) setSelection((prev) => new Set([...(prev ?? []), threadId]));
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['request', id] }),
+        queryClient.invalidateQueries({ queryKey: ['allowlist'] }),
+        queryClient.invalidateQueries({ queryKey: ['health'] }),
+      ]);
+      return true;
+    },
+    [id, queryClient],
+  );
+
+  const setSupplierEmail = useCallback(
+    async (threadId, email) => {
+      const res = await api.updateSupplierEmail(id, threadId, email);
+      // Pre-select a supplier that can now be emailed.
+      if (res.can_email) setSelection((prev) => new Set([...(prev ?? []), threadId]));
+      await queryClient.invalidateQueries({ queryKey: ['request', id] });
+      return res;
+    },
+    [id, queryClient],
+  );
 
   if (isLoading) return <LoadingDetail />;
   if (error) {
@@ -159,15 +213,22 @@ export default function RequestDetail() {
     );
   }
 
-  const contactable = r.suppliers.filter((s) => s.email && s.can_email !== false);
-  const selected = selection ?? new Set(contactable.map((s) => s.id));
+  const choosing = r.status === 'SUPPLIERS_FOUND';
+  // While quotes are coming in, more (not yet contacted) suppliers can still be invited.
+  const inviting = r.status === 'AWAITING_REPLIES' || r.status === 'NEGOTIATING';
+  const editable = choosing || inviting;
+
+  const contactable = r.suppliers.filter((s) => s.status === 'PENDING' && s.email && s.can_email !== false);
+  // First send: everyone contactable is pre-selected. Late invites: nothing until you choose.
+  const selected = new Set(
+    [...(selection ?? (choosing ? contactable.map((s) => s.id) : []))].filter((sid) => contactable.some((s) => s.id === sid)),
+  );
   const toggle = (supplierId) => {
     const next = new Set(selected);
     next.has(supplierId) ? next.delete(supplierId) : next.add(supplierId);
     setSelection(next);
   };
 
-  const choosing = r.status === 'SUPPLIERS_FOUND';
   const failedSending = r.status === 'FAILED' && r.suppliers.some((s) => s.selected && ['SEND_FAILED', 'QUEUED'].includes(s.status));
   const canRediscover = choosing || (r.status === 'FAILED' && !failedSending);
   const busy = sendProposals.isPending || rediscover.isPending;
@@ -233,7 +294,7 @@ export default function RequestDetail() {
 
       {['DEAL_RECOMMENDED', 'CLOSED', 'NO_DEAL', 'CANCELLED'].includes(r.status) && <ApprovalPanel key={r.status} request={r} />}
 
-      <QuoteComparison request={r} />
+      <QuoteComparison request={r} onView={setPanelId} />
 
       <div className="grid grid-cols-[1fr_22rem] items-start gap-6">
         <section className="card overflow-hidden">
@@ -244,11 +305,18 @@ export default function RequestDetail() {
               r.suppliers.length
                 ? choosing
                   ? `${selected.size} of ${contactable.length} contactable supplier${contactable.length === 1 ? '' : 's'} selected`
-                  : `${r.suppliers.length} found · ${contacted.length} contacted`
+                  : inviting && contactable.length
+                    ? `${r.suppliers.length} found · ${contacted.length} contacted · select more to invite`
+                    : `${r.suppliers.length} found · ${contacted.length} contacted`
                 : null
             }
             actions={
               <>
+                {!r.simulation && (
+                  <button className="btn-ghost" onClick={() => setShowAllowlist((v) => !v)} aria-expanded={showAllowlist}>
+                    <Icon name="mail" /> Allowed recipients
+                  </button>
+                )}
                 {canRediscover && (
                   <button className="btn-secondary" onClick={() => rediscover.mutate()} disabled={busy}>
                     {rediscover.isPending ? <Spinner /> : <Icon name="refresh" />}
@@ -259,6 +327,12 @@ export default function RequestDetail() {
                   <button className="btn-primary" onClick={() => sendProposals.mutate([...selected])} disabled={busy || selected.size === 0}>
                     {sendProposals.isPending ? <Spinner /> : <Icon name="send" />}
                     {sendProposals.isPending ? 'Sending…' : `Send proposals to ${selected.size} supplier${selected.size === 1 ? '' : 's'}`}
+                  </button>
+                )}
+                {inviting && contactable.length > 0 && (
+                  <button className="btn-primary" onClick={() => sendProposals.mutate([...selected])} disabled={busy || selected.size === 0}>
+                    {sendProposals.isPending ? <Spinner /> : <Icon name="send" />}
+                    {sendProposals.isPending ? 'Sending…' : `Send proposals to ${selected.size} more supplier${selected.size === 1 ? '' : 's'}`}
                   </button>
                 )}
                 {failedSending && (
@@ -276,14 +350,17 @@ export default function RequestDetail() {
               <Spinner /> Delivering proposals…
             </div>
           )}
+          {showAllowlist && !r.simulation && <AllowlistPanel onClose={() => setShowAllowlist(false)} />}
           {actionError && (
             <div className="flex items-center gap-2 border-b border-red-100 bg-red-50 px-5 py-2.5 text-sm text-red-700">
               <Icon name="alert" /> {actionError.message}
             </div>
           )}
-          {choosing && (
+          {editable && (
             <AddSupplierForm
               requestId={r.id}
+              realEmail={!r.simulation}
+              onAllow={allowEmail}
               onAdded={(threadId, canEmail) => {
                 // Keep the current selection and include the new supplier if it can be emailed.
                 if (canEmail) setSelection(new Set([...selected, threadId]));
@@ -295,7 +372,15 @@ export default function RequestDetail() {
           {r.status === 'DISCOVERING' ? (
             <DiscoveringPlaceholder />
           ) : r.suppliers.length ? (
-            <SupplierTable suppliers={r.suppliers} selectable={choosing} selected={selected} onToggle={toggle} />
+            <SupplierTable
+              suppliers={r.suppliers}
+              selectable={editable}
+              selected={selected}
+              onToggle={toggle}
+              onView={setPanelId}
+              onSetEmail={editable ? setSupplierEmail : undefined}
+              onAllowEmail={editable && !r.simulation ? allowEmail : undefined}
+            />
           ) : (
             <EmptyState icon="building" title="No suppliers yet" description="Run the search again or add a supplier by hand." />
           )}
@@ -322,6 +407,9 @@ export default function RequestDetail() {
           </section>
         </aside>
       </div>
+
+      {/* Live data: the panel re-renders as polling brings new quotes and emails. */}
+      <SupplierPanel request={r} supplier={r.suppliers.find((s) => s.id === panelId)} onClose={closePanel} />
     </div>
   );
 }

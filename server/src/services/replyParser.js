@@ -24,7 +24,8 @@ export function parseReplyText(text, { currency } = {}) {
     unit_price: unitPrice,
     currency: price ? (price[1] ?? SYMBOLS[price[2]]) : currency ?? null,
     delivery_days: delivery ? Number(delivery[1]) : null,
-    payment_terms: payment ? payment[1].trim().replace(/\.$/, '') : null,
+    // Strip list bullets and markdown bold that email clients leave around the value.
+    payment_terms: payment ? payment[1].replace(/\*\*/g, '').replace(/^[\s*•-]+/, '').trim().replace(/\.$/, '') || null : null,
     validity_days: validity ? Number(validity[1]) : null,
     is_final: /\b(best and final|final (price|offer)|cannot go (any )?lower|lowest possible)\b/i.test(text),
     accepts_counter: /\b(accept|agree to) your (counter[- ]?offer|offer|proposed price)\b/i.test(text),

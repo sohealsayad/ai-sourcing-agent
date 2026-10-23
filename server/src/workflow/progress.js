@@ -38,7 +38,23 @@ export async function syncRequestStatus(client, requestId) {
 
   if (request.status !== S.AWAITING_REPLIES && request.status !== S.NEGOTIATING) return request.status;
 
-  const { rows: threads } = await client.query(
+  const threads = await loadThreads(client, requestId);
+
+  if (!threads.every((t) => TERMINAL_THREAD_STATUSES.has(t.status))) {
+    if (request.status === S.AWAITING_REPLIES && threads.some((t) => t.rounds_used > 0)) {
+      await transition(client, requestId, S.NEGOTIATING);
+      return S.NEGOTIATING;
+    }
+    return request.status;
+  }
+
+  // Every supplier has finished: recommend the best final offer, or report that there is none.
+  return finalize(client, request, threads);
+}
+
+/** Selected threads with their latest offer terms, as used for ranking. */
+async function loadThreads(client, requestId) {
+  const { rows } = await client.query(
     `SELECT rs.id, rs.status, rs.rounds_used, rs.opening_price, rs.current_offer_price, s.name,
             lo.delivery_days, lo.payment_terms
        FROM request_suppliers rs
@@ -51,17 +67,17 @@ export async function syncRequestStatus(client, requestId) {
       WHERE rs.request_id = $1 AND rs.selected`,
     [requestId],
   );
+  return rows;
+}
 
-  if (!threads.every((t) => TERMINAL_THREAD_STATUSES.has(t.status))) {
-    if (request.status === S.AWAITING_REPLIES && threads.some((t) => t.rounds_used > 0)) {
-      await transition(client, requestId, S.NEGOTIATING);
-      return S.NEGOTIATING;
-    }
-    return request.status;
-  }
-
-  // Every supplier has finished: recommend the best final offer, or report that there is none.
-  return finalize(client, request, threads);
+/**
+ * Re-ranks a request whose recommendation is already out (e.g. a supplier lowered a final offer
+ * before approval); otherwise just settles the status as usual.
+ */
+export async function refreshRecommendation(client, requestId) {
+  const request = await lockRequest(client, requestId);
+  if (request.status !== S.DEAL_RECOMMENDED) return syncRequestStatus(client, requestId);
+  return finalize(client, request, await loadThreads(client, requestId));
 }
 
 async function finalize(client, request, threads) {
@@ -113,8 +129,9 @@ async function finalize(client, request, threads) {
     'UPDATE sourcing_requests SET recommendation = $2, recommended_request_supplier_id = $3 WHERE id = $1',
     [request.id, recommendation, best.requestSupplierId],
   );
-  await transition(client, request.id, S.DEAL_RECOMMENDED);
-  await logEvent(client, request.id, 'DEAL_RECOMMENDED', {
+  const updated = request.status === S.DEAL_RECOMMENDED;
+  if (!updated) await transition(client, request.id, S.DEAL_RECOMMENDED);
+  await logEvent(client, request.id, updated ? 'RECOMMENDATION_UPDATED' : 'DEAL_RECOMMENDED', {
     supplier: best.name,
     price: best.price,
     score: best.score,

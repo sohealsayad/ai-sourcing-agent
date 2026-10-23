@@ -1,66 +1,95 @@
-import { Link, NavLink, Route, Routes } from 'react-router-dom';
-import { EmptyState, Icon } from './components/ui.jsx';
+import { useCallback, useEffect, useState } from 'react';
+import { Link, Route, Routes } from 'react-router-dom';
+import Sidebar from './components/Sidebar.jsx';
+import Topbar from './components/Topbar.jsx';
+import { EmptyState } from './components/ui.jsx';
 import NewRequest from './pages/NewRequest.jsx';
 import RequestDetail from './pages/RequestDetail.jsx';
+import ApprovalsPage from './pages/ApprovalsPage.jsx';
+import NegotiationsPage from './pages/NegotiationsPage.jsx';
+import QuotesPage from './pages/QuotesPage.jsx';
 import RequestList from './pages/RequestList.jsx';
+import SettingsPage from './pages/SettingsPage.jsx';
+import SuppliersPage from './pages/SuppliersPage.jsx';
 
-const navClass = ({ isActive }) =>
-  `rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-    isActive ? 'bg-slate-100 text-slate-900' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-900'
-  }`;
+const STORAGE_KEY = 'sourcing-desk:sidebar-collapsed';
+
+// Remember the sidebar state per browser; storage may be unavailable (private mode), so never rely on it.
+function readCollapsed() {
+  try {
+    return localStorage.getItem(STORAGE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+// The shortcut must not fire while the user is typing.
+const isTypingTarget = (el) =>
+  el instanceof HTMLElement && (el.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName));
 
 export default function App() {
+  const [collapsed, setCollapsed] = useState(readCollapsed);
+  const toggle = useCallback(
+    () =>
+      setCollapsed((value) => {
+        try {
+          localStorage.setItem(STORAGE_KEY, String(!value));
+        } catch {
+          // ignore
+        }
+        return !value;
+      }),
+    [],
+  );
+
+  // Ctrl+B (Cmd+B on Mac) shows or hides the sidebar.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'b') return;
+      if (isTypingTarget(e.target)) return;
+      e.preventDefault();
+      toggle();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [toggle]);
+
   return (
     <div className="min-h-screen">
-      <header className="sticky top-0 z-30 border-b border-slate-200/80 bg-white/85 backdrop-blur">
-        <div className="mx-auto flex h-16 max-w-7xl items-center gap-8 px-8">
-          <Link to="/" className="flex items-center gap-2.5">
-            <span className="grid size-8 place-items-center rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 text-white shadow-sm">
-              <Icon name="layers" className="size-4" />
-            </span>
-            <span className="leading-tight">
-              <span className="block text-[15px] font-semibold tracking-tight text-slate-900">Sourcing Desk</span>
-              <span className="block text-[11px] font-medium text-slate-500">AI procurement workflow</span>
-            </span>
-          </Link>
-          <nav className="flex items-center gap-1">
-            <NavLink to="/" end className={navClass}>
-              Requests
-            </NavLink>
-            <NavLink to="/new" className={navClass}>
-              New request
-            </NavLink>
-          </nav>
-          <Link to="/new" className="btn-primary ml-auto">
-            <Icon name="plus" /> New request
-          </Link>
-        </div>
-      </header>
+      <Sidebar collapsed={collapsed} onToggle={toggle} />
 
-      <main className="mx-auto max-w-7xl px-8 py-8">
-        <Routes>
-          <Route path="/" element={<RequestList />} />
-          <Route path="/new" element={<NewRequest />} />
-          <Route path="/requests/:id" element={<RequestDetail />} />
-          <Route
-            path="*"
-            element={
-              <div className="card">
-                <EmptyState
-                  icon="search"
-                  title="Page not found"
-                  description="The page you are looking for does not exist."
-                  action={
-                    <Link to="/" className="btn-secondary">
-                      Back to requests
-                    </Link>
-                  }
-                />
-              </div>
-            }
-          />
-        </Routes>
-      </main>
+      <div className={`transition-[padding] duration-200 ${collapsed ? 'pl-[72px]' : 'pl-64'}`}>
+        <Topbar collapsed={collapsed} onToggle={toggle} />
+        <main className="mx-auto max-w-7xl px-8 py-8">
+          <Routes>
+            <Route path="/" element={<RequestList />} />
+            <Route path="/new" element={<NewRequest />} />
+            <Route path="/requests/:id" element={<RequestDetail />} />
+            <Route path="/suppliers" element={<SuppliersPage />} />
+            <Route path="/quotes" element={<QuotesPage />} />
+            <Route path="/negotiations" element={<NegotiationsPage />} />
+            <Route path="/approvals" element={<ApprovalsPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route
+              path="*"
+              element={
+                <div className="card">
+                  <EmptyState
+                    icon="search"
+                    title="Page not found"
+                    description="The page you are looking for does not exist."
+                    action={
+                      <Link to="/" className="btn-secondary">
+                        Back to requests
+                      </Link>
+                    }
+                  />
+                </div>
+              }
+            />
+          </Routes>
+        </main>
+      </div>
     </div>
   );
 }

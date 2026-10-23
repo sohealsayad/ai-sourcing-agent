@@ -46,6 +46,21 @@ export const AddSupplierSchema = z.object({
   website: optional(z.string().trim().url('Enter a full URL, e.g. https://…')),
 });
 
+/** Per-request email for one supplier; null or "" clears it (back to the supplier's own address). */
+export const SupplierEmailSchema = z.object({
+  email: z.preprocess(
+    (v) => (v === '' || v === undefined ? null : v),
+    z.string().trim().toLowerCase().email('Enter a valid email address').nullable(),
+  ),
+});
+
+/** A quote typed in by the buyer when a supplier's reply could not be read automatically. */
+export const ManualQuoteSchema = z.object({
+  unit_price: z.coerce.number().positive('Enter a price greater than 0'),
+  delivery_days: optional(z.coerce.number().int().positive('Delivery days must be a whole number')),
+  payment_terms: optional(z.string().trim().max(200)),
+});
+
 export const SendProposalsSchema = z.object({
   requestSupplierIds: z.array(z.string().uuid('Invalid supplier id')).min(1, 'Select at least one supplier').max(50).optional(),
 });

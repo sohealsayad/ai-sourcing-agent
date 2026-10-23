@@ -4,6 +4,7 @@
 //    EMAIL_ALLOW_ANY_RECIPIENT=true. Recipients are never rewritten or redirected.
 import nodemailer from 'nodemailer';
 import { config } from '../config.js';
+import { isUiAllowed } from './emailAllowlist.js';
 import { isRecipientAllowed } from './recipients.js';
 
 /** A failure that retrying cannot fix (e.g. a blocked recipient). */
@@ -70,7 +71,8 @@ export const isSimulatedTransport = () => Boolean(transport.simulated);
 export function recipientAllowed(email) {
   if (!email) return false;
   if (transport.simulated || config.email.allowAnyRecipient) return true;
-  return isRecipientAllowed(email, config.email.allowedRecipients);
+  // Allowed via .env (EMAIL_ALLOWED_RECIPIENTS) or approved from the UI.
+  return isRecipientAllowed(email, config.email.allowedRecipients) || isUiAllowed(email);
 }
 
 /** Sends one email. Resolves to { externalId }; throws on failure. */

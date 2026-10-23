@@ -182,6 +182,25 @@ describe('simulated negotiation', () => {
   });
 });
 
+describe('cross-request views', () => {
+  test('quotes, negotiations and suppliers reflect a negotiated request', async () => {
+    const r = await runToRecommendation();
+
+    const quotes = (await api.get('/quotes')).body.filter((q) => q.request_id === r.id);
+    assert.ok(quotes.some((q) => q.supplier === 'Alpha Foods' && q.unit_price === 1000 && q.round === 0));
+    assert.ok(quotes.every((q) => q.commodity === '1121 Basmati rice' && q.currency === 'USD'));
+
+    const negotiations = (await api.get('/negotiations')).body.filter((n) => n.request_id === r.id);
+    assert.deepEqual(negotiations.map((n) => n.supplier).sort(), ['Alpha Foods', 'Beta Traders', 'Gamma Exports']);
+    assert.ok(negotiations.every((n) => n.max_rounds === 3));
+
+    await api.post(`/requests/${r.id}/approve`, { requestSupplierId: threadOf(r, 'Alpha Foods').id, approvedBy: 'Sayad' });
+    const alpha = (await api.get('/suppliers')).body.find((s) => s.name === 'Alpha Foods');
+    assert.deepEqual([alpha.requests, alpha.contacted, alpha.quoted, alpha.won], [1, 1, 1, 1]);
+    assert.equal((await api.get('/negotiations')).body.filter((n) => n.request_id === r.id).length, 0, 'closed requests drop out');
+  });
+});
+
 describe('human approval', () => {
   test('approving sends exactly one acceptance and regrets to the others', async () => {
     const r = await runToRecommendation();
@@ -302,8 +321,10 @@ describe('inbound email webhook', () => {
     await api.post('/webhooks/email', { from: 'sales@alpha.example.com', subject: `Re: ${ref}`, text: 'Thanks, we will revert next week.' });
     await drain();
 
+    // A reply without a price no longer ends the negotiation: the supplier is still awaited.
     const r = await getRequest(request.id);
-    assert.equal(threadOf(r, 'Alpha Foods').status, 'NEEDS_REVIEW');
-    assert.equal(r.status, 'NO_DEAL');
+    assert.equal(threadOf(r, 'Alpha Foods').status, 'CONTACTED');
+    assert.equal(r.status, 'AWAITING_REPLIES');
+    assert.ok(r.events.some((e) => e.type === 'REPLY_WITHOUT_PRICE' && e.payload.supplier === 'Alpha Foods'));
   });
 });

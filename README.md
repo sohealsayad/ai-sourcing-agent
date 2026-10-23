@@ -79,7 +79,9 @@ Integration tests use a real Postgres test database (created automatically) and 
 | `AI_MODE` | `live` if the provider's key is set, else `mock` | `mock` needs no API key |
 | `AI_PROVIDER` | `gemini` if `GEMINI_API_KEY` is set, else `anthropic` | Which AI runs live mode |
 | `GEMINI_API_KEY` | — | Gemini key from [Google AI Studio](https://aistudio.google.com/apikey); enables live supplier search (Google Search grounding) and AI reply parsing |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model for live mode |
+| `GEMINI_MODEL` | `gemini-3.5-flash` | Gemini model for live mode |
+| `SEARCH_PROVIDER` | `tavily` if `TAVILY_API_KEY` is set, else `none` | How Gemini finds suppliers online: `tavily` (free web search, Gemini reads the results), `gemini` (Google Search grounding, needs billing) or `none` (AI knowledge only, marked "not web-verified") |
+| `TAVILY_API_KEY` | — | Free key from [Tavily](https://app.tavily.com) for live supplier search |
 | `ANTHROPIC_API_KEY` | — | Alternative: Claude for live mode (`AI_PROVIDER=anthropic`) |
 | `ANTHROPIC_MODEL` | `claude-sonnet-5-5` | Claude model for live mode |
 | `MAX_SUPPLIERS` / `MAX_WEB_SEARCHES` | `5` / `6` | Discovery limits |

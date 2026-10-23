@@ -17,6 +17,7 @@ export function parseList(value) {
 
 const AI_PROVIDERS = ['gemini', 'anthropic'];
 const AI_KEY_VARS = { gemini: 'GEMINI_API_KEY', anthropic: 'ANTHROPIC_API_KEY' };
+const SEARCH_PROVIDERS = ['tavily', 'gemini', 'none'];
 const EMAIL_TRANSPORTS = ['simulated', 'smtp'];
 const INBOUND_PROVIDERS = ['none', 'imap'];
 
@@ -44,7 +45,8 @@ export function buildConfig(env) {
       provider: aiProvider,
       gemini: {
         apiKey: env.GEMINI_API_KEY || '',
-        model: env.GEMINI_MODEL || 'gemini-2.5-flash',
+        // gemini-2.5-flash is no longer offered to new API keys.
+        model: env.GEMINI_MODEL || 'gemini-3.5-flash',
       },
       // Anthropic (Claude) settings:
       apiKey,
@@ -54,6 +56,13 @@ export function buildConfig(env) {
     },
 
     maxSuppliers: Number(env.MAX_SUPPLIERS || 5),
+
+    // How Gemini finds suppliers online: Tavily web search (free tier) whose results Gemini reads,
+    // Gemini's own Google Search grounding (needs billing), or none (knowledge only).
+    search: {
+      provider: env.SEARCH_PROVIDER || (env.TAVILY_API_KEY ? 'tavily' : 'none'),
+      tavilyApiKey: env.TAVILY_API_KEY || '',
+    },
 
     email: {
       // "simulated" (default) records emails without sending; "smtp" really sends them.
@@ -106,6 +115,12 @@ export function buildConfig(env) {
     errors.push(`AI_PROVIDER must be one of ${AI_PROVIDERS.join(', ')} (got "${aiProvider}").`);
   } else if (aiMode === 'live' && !providerKey) {
     errors.push(`AI_MODE=live with AI_PROVIDER=${aiProvider} requires ${AI_KEY_VARS[aiProvider]}.`);
+  }
+
+  if (!SEARCH_PROVIDERS.includes(cfg.search.provider)) {
+    errors.push(`SEARCH_PROVIDER must be one of ${SEARCH_PROVIDERS.join(', ')} (got "${cfg.search.provider}").`);
+  } else if (cfg.search.provider === 'tavily' && !cfg.search.tavilyApiKey) {
+    errors.push('SEARCH_PROVIDER=tavily requires TAVILY_API_KEY.');
   }
 
   if (!EMAIL_TRANSPORTS.includes(transport)) {

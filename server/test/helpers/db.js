@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import { createApp } from '../../src/app.js';
 import { migrate } from '../../src/db/migrate.js';
 import { pool, query } from '../../src/db/pool.js';
+import { resetAllowlistCache } from '../../src/services/emailAllowlist.js';
 import { interceptEnqueue } from '../../src/workflow/queue.js';
 import { handlers } from '../../src/workflow/worker.js';
 
@@ -57,7 +58,8 @@ export async function setupDatabase() {
 }
 
 export async function resetDatabase() {
-  await query('TRUNCATE sourcing_requests, suppliers, inbound_cursor RESTART IDENTITY CASCADE');
+  await query('TRUNCATE sourcing_requests, suppliers, inbound_cursor, email_allowlist RESTART IDENTITY CASCADE');
+  resetAllowlistCache();
   jobs.length = 0;
 }
 
@@ -149,6 +151,8 @@ export async function startServer() {
   return {
     get: (path) => call('GET', path),
     post: (path, body) => call('POST', path, body),
+    patch: (path, body) => call('PATCH', path, body),
+    delete: (path) => call('DELETE', path),
     close: () => new Promise((resolve) => server.close(resolve)),
   };
 }

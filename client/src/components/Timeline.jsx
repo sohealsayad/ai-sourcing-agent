@@ -26,6 +26,18 @@ function describe(event, currency) {
   const p = event.payload ?? {};
   const money = (v) => formatMoney(v, currency);
   switch (event.type) {
+    case 'REPLY_WITHOUT_PRICE':
+      return { title: `${p.supplier} replied without a price`, detail: 'Still waiting for a quote' };
+    case 'REPLIES_RECHECKED':
+      return { title: `Re-checking ${p.supplier}'s latest reply` };
+    case 'QUOTE_ENTERED_MANUALLY':
+      return { title: `Quote for ${p.supplier} entered manually`, detail: money(p.price) };
+    case 'SUPPLIER_CLOSED_MANUALLY':
+      return { title: `${p.supplier} marked as no response`, detail: p.outcome === 'NO_RESPONSE' ? 'Closed without a quote' : 'Their last offer stands', tone: 'warn' };
+    case 'RECIPIENT_ALLOWED':
+      return { title: `Allowed real emails to ${p.email}` };
+    case 'SUPPLIER_EMAIL_SET':
+      return { title: `Email for ${p.supplier} ${p.overridden ? 'set' : 'reset'}`, detail: `${p.email ?? 'none'}${p.canEmail ? '' : ' · not in email allowlist'}` };
     case 'SUPPLIER_ADDED':
       return { title: `${p.supplier} added`, detail: `${p.email}${p.canEmail ? '' : ' · not in email allowlist'}` };
     case 'REPLY_RECEIVED':
@@ -51,6 +63,10 @@ function describe(event, currency) {
       return { title: `Couldn't read ${p.supplier}'s reply`, detail: 'Needs manual review', tone: 'warn' };
     case 'LATE_REPLY_IGNORED':
       return { title: `Late reply from ${p.supplier} ignored`, detail: `Thread was already ${p.threadStatus.toLowerCase().replace(/_/g, ' ')}` };
+    case 'OFFER_IMPROVED':
+      return { title: `${p.supplier} lowered their offer to ${money(p.price)}`, detail: `Was ${money(p.previous)} · no email sent` };
+    case 'RECOMMENDATION_UPDATED':
+      return { title: `Recommendation updated: ${p.supplier} at ${money(p.price)}`, detail: `Score ${p.score}` };
     case 'DEAL_RECOMMENDED':
       return { title: `Recommended ${p.supplier} at ${money(p.price)}`, detail: `Score ${p.score} · ${p.offers} eligible offer${p.offers === 1 ? '' : 's'}` };
     case 'DEAL_APPROVED':
@@ -73,13 +89,16 @@ function describe(event, currency) {
         detail:
           p.mode === 'mock'
             ? 'Mock AI mode (no API key)'
-            : p.searchQueries?.length
-              ? `Searched: ${p.searchQueries.map((q) => `“${q}”`).join(', ')}`
-              : null,
+            : p.mode === 'live-unverified'
+              ? `AI knowledge only (no web search)${p.searchError ? `: ${p.searchError}` : ''}`
+              : p.searchQueries?.length
+                ? `Searched: ${p.searchQueries.map((q) => `“${q}”`).join(', ')}`
+                : null,
+        tone: p.mode === 'live-unverified' ? 'warn' : undefined,
       };
     case 'PROPOSALS_QUEUED':
       return {
-        title: `${p.retry ? 'Retrying' : 'Sending'} proposals to ${p.count} supplier${p.count === 1 ? '' : 's'}`,
+        title: `${p.retry ? 'Retrying' : p.late ? 'Inviting more suppliers:' : 'Sending'} proposals to ${p.count} supplier${p.count === 1 ? '' : 's'}`,
         detail: p.suppliers?.join(', '),
       };
     case 'MESSAGE_SENT':

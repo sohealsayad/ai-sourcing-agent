@@ -4,7 +4,10 @@ import { ZodError } from 'zod';
 import { config } from './config.js';
 import { pool } from './db/pool.js';
 import { HttpError } from './errors.js';
+import { emailAllowlistRouter } from './routes/emailAllowlist.js';
+import { insightsRouter } from './routes/insights.js';
 import { requestsRouter } from './routes/requests.js';
+import { allowlistSize } from './services/emailAllowlist.js';
 import { webhooksRouter } from './routes/webhooks.js';
 
 export function createApp() {
@@ -20,14 +23,17 @@ export function createApp() {
       aiProvider: config.ai.mode === 'live' ? config.ai.provider : 'mock',
       aiModel: config.ai.mode === 'live' ? (config.ai.provider === 'gemini' ? config.ai.gemini.model : config.ai.model) : null,
       emailTransport: config.email.transport,
-      allowedRecipients: config.email.allowAnyRecipient ? 'any' : config.email.allowedRecipients.length,
+      allowedRecipients: config.email.allowAnyRecipient ? 'any' : allowlistSize(),
       inboundProvider: config.inbound.provider,
       simulatedSuppliers: config.simulation.suppliers,
+      searchProvider: config.ai.mode === 'live' ? (config.ai.provider === 'anthropic' ? 'claude-web-search' : config.search.provider) : 'none',
     });
   });
 
   app.use('/api/requests', requestsRouter);
   app.use('/api/webhooks', webhooksRouter);
+  app.use('/api/email-allowlist', emailAllowlistRouter);
+  app.use('/api', insightsRouter);
 
   app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 

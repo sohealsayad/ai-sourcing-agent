@@ -27,11 +27,23 @@ async function request(path, options = {}) {
 const post = (path, data) => request(path, { method: 'POST', body: JSON.stringify(data ?? {}) });
 
 export const api = {
+  health: () => request('/health'),
   listRequests: () => request('/requests'),
   getRequest: (id) => request(`/requests/${id}`),
   createRequest: (data) => post('/requests', data),
   rediscover: (id) => post(`/requests/${id}/rediscover`),
   addSupplier: (id, supplier) => post(`/requests/${id}/suppliers`, supplier),
+  listSuppliers: () => request('/suppliers'),
+  listQuotes: () => request('/quotes'),
+  listNegotiations: () => request('/negotiations'),
+  recheckSupplier: (id, threadId) => post(`/requests/${id}/suppliers/${threadId}/recheck`),
+  enterQuote: (id, threadId, quote) => post(`/requests/${id}/suppliers/${threadId}/quote`, quote),
+  closeSupplier: (id, threadId) => post(`/requests/${id}/suppliers/${threadId}/close`),
+  listAllowedRecipients: () => request('/email-allowlist'),
+  allowRecipient: (email, requestId) => post('/email-allowlist', { email, ...(requestId && { requestId }) }),
+  removeAllowedRecipient: (email) => request(`/email-allowlist/${encodeURIComponent(email)}`, { method: 'DELETE' }),
+  updateSupplierEmail: (id, threadId, email) =>
+    request(`/requests/${id}/suppliers/${threadId}`, { method: 'PATCH', body: JSON.stringify({ email }) }),
   sendProposals: (id, requestSupplierIds) => post(`/requests/${id}/send-proposals`, requestSupplierIds ? { requestSupplierIds } : {}),
   approveDeal: (id, requestSupplierId, approvedBy) => post(`/requests/${id}/approve`, { requestSupplierId, approvedBy }),
   rejectDeals: (id, rejectedBy, reason) => post(`/requests/${id}/reject`, { rejectedBy, reason }),

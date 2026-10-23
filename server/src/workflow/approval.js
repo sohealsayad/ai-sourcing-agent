@@ -10,7 +10,7 @@ const QUOTED = [ThreadStatus.FINAL_OFFER, ThreadStatus.WALKED_AWAY];
 
 async function loadThreads(client, requestId) {
   const { rows } = await client.query(
-    `SELECT rs.*, s.name, s.email FROM request_suppliers rs JOIN suppliers s ON s.id = rs.supplier_id
+    `SELECT rs.*, s.name, COALESCE(rs.contact_email, s.email) AS email FROM request_suppliers rs JOIN suppliers s ON s.id = rs.supplier_id
       WHERE rs.request_id = $1 AND rs.selected
       ORDER BY rs.id
       FOR UPDATE OF rs`,

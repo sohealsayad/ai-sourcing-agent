@@ -1,7 +1,18 @@
-export const formatMoney = (value, currency) =>
-  value == null
-    ? '—'
-    : new Intl.NumberFormat(undefined, { style: 'currency', currency, maximumFractionDigits: 2 }).format(value);
+/**
+ * Money with the currency's conventions: INR uses Indian grouping (₹22,00,000.00).
+ * Missing or non-numeric values show "—"; an unknown currency code falls back to a plain number.
+ */
+export const formatMoney = (value, currency) => {
+  const amount = typeof value === 'number' ? value : Number(value);
+  if (value == null || value === '' || !Number.isFinite(amount)) return '—';
+  const locale = currency === 'INR' ? 'en-IN' : undefined;
+  try {
+    return new Intl.NumberFormat(locale, { style: 'currency', currency, maximumFractionDigits: 2 }).format(amount);
+  } catch {
+    const plain = new Intl.NumberFormat(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount);
+    return currency ? `${plain} ${currency}` : plain;
+  }
+};
 
 export const formatNumber = (value) => (value == null ? '—' : new Intl.NumberFormat().format(value));
 

@@ -2,7 +2,7 @@ import { query, withTransaction } from '../../db/pool.js';
 import { decideNextMove } from '../../services/negotiation.js';
 import { buildCounter } from '../../services/proposals.js';
 import { parseReply } from '../../services/replyParser.js';
-import { syncRequestStatus } from '../progress.js';
+import { refreshRecommendation, syncRequestStatus } from '../progress.js';
 import { enqueueDeliveries } from '../queue.js';
 import { logEvent, ThreadStatus } from '../stateMachine.js';
 
@@ -23,7 +23,7 @@ async function closeThread(client, threadId, status, reason) {
 export async function processReply(job) {
   const { messageId } = job.data;
   const { rows: [msg] } = await query(
-    `SELECT m.id, m.body, m.processed_at, m.created_at, m.request_supplier_id, r.currency
+    `SELECT m.id, m.body, m.processed_at, m.created_at, m.parsed_json, m.request_supplier_id, r.currency
        FROM messages m
        JOIN request_suppliers rs ON rs.id = m.request_supplier_id
        JOIN sourcing_requests r ON r.id = rs.request_id
@@ -32,8 +32,9 @@ export async function processReply(job) {
   );
   if (!msg || msg.processed_at) return;
 
-  // Parse outside the transaction: in live mode this may call the LLM.
-  const parsed = await parseReply(msg.body, { currency: msg.currency });
+  // A quote entered by hand is already structured; otherwise parse outside the transaction,
+  // because in live mode this may call the LLM.
+  const parsed = msg.parsed_json?.manual ? msg.parsed_json : await parseReply(msg.body, { currency: msg.currency });
 
   const toDeliver = await withTransaction(async (client) => {
     // Lock order everywhere: thread/message first, then the request (inside syncRequestStatus).
@@ -48,6 +49,39 @@ export async function processReply(job) {
 
     const { rows: [request] } = await client.query('SELECT * FROM sourcing_requests WHERE id = $1', [t.request_id]);
     const supplier = t.supplier_name;
+
+    // A supplier may still lower a final offer before approval: record it and re-rank, send nothing.
+    // Terms the new reply does not mention are carried over from their previous offer.
+    if (
+      t.status === ThreadStatus.FINAL_OFFER &&
+      !['CLOSED', 'CANCELLED'].includes(request.status) &&
+      parsed.unit_price != null &&
+      t.current_offer_price != null &&
+      parsed.unit_price < t.current_offer_price
+    ) {
+      await client.query(
+        `INSERT INTO offers (request_supplier_id, round, unit_price, quantity, delivery_days, payment_terms, valid_until,
+                             currency, is_final, message_id)
+         SELECT $1, $2, $3, $4, COALESCE($5, prev.delivery_days), COALESCE($6, prev.payment_terms),
+                CASE WHEN $7::int IS NULL THEN prev.valid_until ELSE current_date + $7::int END, $8, true, $9
+           FROM (SELECT NULL) x
+           LEFT JOIN LATERAL (
+             SELECT delivery_days, payment_terms, valid_until FROM offers
+              WHERE request_supplier_id = $1 ORDER BY round DESC, created_at DESC LIMIT 1
+           ) prev ON true
+         ON CONFLICT (message_id) WHERE message_id IS NOT NULL DO NOTHING`,
+        [t.id, t.rounds_used, parsed.unit_price, request.quantity, parsed.delivery_days, parsed.payment_terms,
+          parsed.validity_days, parsed.currency ?? request.currency, msg.id],
+      );
+      await client.query(
+        `UPDATE request_suppliers SET current_offer_price = $2, final_reason = 'Supplier improved their offer', updated_at = now()
+          WHERE id = $1`,
+        [t.id, parsed.unit_price],
+      );
+      await logEvent(client, request.id, 'OFFER_IMPROVED', { supplier, price: parsed.unit_price, previous: t.current_offer_price });
+      await refreshRecommendation(client, request.id);
+      return [];
+    }
 
     if (!AWAITING.includes(t.status)) {
       await logEvent(client, request.id, 'LATE_REPLY_IGNORED', { supplier, threadStatus: t.status });
@@ -74,10 +108,10 @@ export async function processReply(job) {
       return [];
     }
 
+    // Suppliers often acknowledge first ("Yes, we are interested") and quote later: keep waiting.
+    // The reply timeout still applies, and a price can also be entered by hand.
     if (parsed.unit_price == null) {
-      await closeThread(client, t.id, ThreadStatus.NEEDS_REVIEW, 'Could not read a price from the reply; please review it manually');
-      await logEvent(client, request.id, 'REPLY_NEEDS_REVIEW', { supplier });
-      await syncRequestStatus(client, request.id);
+      await logEvent(client, request.id, 'REPLY_WITHOUT_PRICE', { supplier });
       return [];
     }
 
@@ -144,11 +178,11 @@ export async function processReply(job) {
       });
       const { rows } = await client.query(
         `INSERT INTO messages (request_supplier_id, direction, kind, subject, body, to_email, idempotency_key, delivery_status, parsed_json)
-         SELECT $1, 'outbound', 'COUNTER', $2, $3, s.email, $4, 'PENDING', $5
-           FROM suppliers s WHERE s.id = $6
+         SELECT $1, 'outbound', 'COUNTER', $2, $3, COALESCE(rs.contact_email, s.email), $4, 'PENDING', $5
+           FROM request_suppliers rs JOIN suppliers s ON s.id = rs.supplier_id WHERE rs.id = $1
          ON CONFLICT (idempotency_key) DO NOTHING
          RETURNING id`,
-        [t.id, subject, body, `counter:${t.id}:${round}`, { counter_price: decision.counterPrice, round }, t.supplier_id],
+        [t.id, subject, body, `counter:${t.id}:${round}`, { counter_price: decision.counterPrice, round }],
       );
       if (rows[0]) messageIds.push(rows[0].id);
       await client.query(

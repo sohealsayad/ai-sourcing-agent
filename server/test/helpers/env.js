@@ -21,6 +21,9 @@ process.env.EMAIL_TRANSPORT = 'simulated';
 process.env.EMAIL_ALLOWED_RECIPIENTS = '';
 process.env.EMAIL_ALLOW_ANY_RECIPIENT = 'false';
 process.env.INBOUND_PROVIDER = 'none';
+// Never call real search services from tests.
+process.env.SEARCH_PROVIDER = 'none';
+process.env.TAVILY_API_KEY = '';
 process.env.SIMULATE_SUPPLIERS = 'true';
 process.env.SIM_REPLY_DELAY_SECONDS = '0';
 process.env.REPLY_TIMEOUT_SECONDS = '45';

@@ -3,7 +3,7 @@ import StatusBadge from './StatusBadge.jsx';
 import { CardHeader } from './ui.jsx';
 
 /** Every quote in one table: latest vs opening price, gap to target, total, terms, rounds and score. */
-export default function QuoteComparison({ request }) {
+export default function QuoteComparison({ request, onView }) {
   const { currency, target_price: target, max_price: max, quantity, recommendation, unit } = request;
   const scores = new Map((recommendation?.ranked ?? []).map((o) => [o.requestSupplierId, o]));
   const approved = request.status === 'CLOSED';
@@ -46,6 +46,7 @@ export default function QuoteComparison({ request }) {
             <th className="th text-right">Rounds</th>
             <th className="th text-right">Score</th>
             <th className="th">Status</th>
+            <th className="th w-16" />
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
@@ -90,6 +91,11 @@ export default function QuoteComparison({ request }) {
                 <td className="td tabular text-right font-semibold text-slate-900">{s.scored ? s.scored.score.toFixed(1) : '—'}</td>
                 <td className="td">
                   <StatusBadge status={s.status} kind="thread" />
+                </td>
+                <td className="td text-right">
+                  <button type="button" onClick={() => onView(s.id)} className="btn-ghost px-2.5 py-1 text-xs text-brand-700">
+                    View
+                  </button>
                 </td>
               </tr>
             );

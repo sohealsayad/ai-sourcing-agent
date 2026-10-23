@@ -158,10 +158,296 @@ describe('adding test suppliers by hand', () => {
     assert.equal((await api.post(`/requests/${other.id}/suppliers`, body)).status, 201);
     assert.equal(await count(`SELECT 1 FROM suppliers WHERE email = 'temp1@tempmail.test'`), 1);
 
-    const { request: late } = await seedRequest({ status: 'NEGOTIATING' });
-    const wrong = await api.post(`/requests/${late.id}/suppliers`, body);
+    const { request: done } = await seedRequest({ status: 'DEAL_RECOMMENDED' });
+    const wrong = await api.post(`/requests/${done.id}/suppliers`, body);
     assert.equal(wrong.status, 409);
-    assert.match(wrong.body.error, /before proposals are sent/);
+    assert.match(wrong.body.error, /until a deal is recommended/);
+  });
+});
+
+describe('finishing a real-email negotiation', () => {
+  test('an acknowledgement without a price keeps waiting; the later quote is negotiated', async () => {
+    const { requestId, ref } = await contactedSupplier();
+    await api.post('/webhooks/email', { from: 'sales@alpha.example.com', subject: `Re: ${ref}`, text: 'Yes, we are interested.' });
+    await drain();
+    let alpha = threadOf(await getRequest(requestId), 'Alpha Foods');
+    assert.equal(alpha.status, 'CONTACTED', 'still waiting for a quote');
+
+    await api.post('/webhooks/email', {
+      from: 'sales@alpha.example.com',
+      subject: `Re: ${ref}`,
+      text: 'Dear Procurement Team,\n* **Unit Price:** USD 900 per tonne, delivered\n* **Delivery Time:** Within 7 days of order confirmation\n* **Payment Terms:** 30% advance and 70% upon delivery',
+    });
+    await drain();
+    alpha = threadOf(await getRequest(requestId), 'Alpha Foods');
+    assert.equal(alpha.current_offer_price, 900);
+    assert.equal(alpha.status, 'COUNTERED', '900 is above the 850 target, so the agent counters');
+    assert.equal(alpha.offers[0].payment_terms, '30% advance and 70% upon delivery');
+    assert.equal(alpha.offers[0].delivery_days, 7);
+  });
+
+  test('re-check re-reads the latest reply of a supplier that needs review', async () => {
+    const { requestId } = await contactedSupplier();
+    const alphaId = threadOf(await getRequest(requestId), 'Alpha Foods').id;
+    // The state an older version left behind: a quote already marked processed, supplier parked for review.
+    await query(
+      `INSERT INTO messages (request_supplier_id, direction, kind, subject, body, delivery_status, processed_at)
+       VALUES ($1, 'inbound', 'REPLY', 'Re: quote', 'Unit Price: USD 900 per tonne', 'RECEIVED', now())`,
+      [alphaId],
+    );
+    await query(`UPDATE request_suppliers SET status = 'NEEDS_REVIEW', final_reason = 'Could not read a price' WHERE id = $1`, [alphaId]);
+
+    const res = await api.post(`/requests/${requestId}/suppliers/${alphaId}/recheck`, {});
+    assert.equal(res.status, 202);
+    await drain();
+    const alpha = threadOf(await getRequest(requestId), 'Alpha Foods');
+    assert.equal(alpha.current_offer_price, 900);
+    assert.equal(alpha.status, 'COUNTERED');
+
+    const again = await api.post(`/requests/${requestId}/suppliers/${alphaId}/recheck`, {});
+    assert.equal(again.status, 409, 'only suppliers that need review can be re-checked');
+  });
+
+  test('a manual quote follows the negotiation; "no response" closes silent suppliers', async () => {
+    const { request } = await seedRequest({
+      suppliers: [
+        { name: 'Alpha Foods', email: 'sales@alpha.example.com', score: 90 },
+        { name: 'Silent Supply', email: 'silent@tempmail.test', score: 80 },
+      ],
+    });
+    await api.post(`/requests/${request.id}/send-proposals`, {});
+    await drain();
+    let r = await getRequest(request.id);
+    const alphaId = threadOf(r, 'Alpha Foods').id;
+    const silentId = threadOf(r, 'Silent Supply').id;
+
+    assert.equal((await api.post(`/requests/${request.id}/suppliers/${alphaId}/quote`, { unit_price: 0 })).status, 400);
+    const quote = await api.post(`/requests/${request.id}/suppliers/${alphaId}/quote`, { unit_price: 840, delivery_days: 10, payment_terms: 'Net 30' });
+    assert.equal(quote.status, 202);
+    await drain();
+    r = await getRequest(request.id);
+    assert.equal(threadOf(r, 'Alpha Foods').status, 'FINAL_OFFER', '840 meets the 850 target');
+    assert.equal(r.status, 'AWAITING_REPLIES', 'still waiting for Silent Supply');
+
+    const closed = await api.post(`/requests/${request.id}/suppliers/${silentId}/close`, {});
+    assert.deepEqual(closed.body, { id: silentId, status: 'NO_RESPONSE' });
+    r = await getRequest(request.id);
+    assert.equal(r.status, 'DEAL_RECOMMENDED', 'everyone finished, so the deal is recommended');
+    assert.ok(r.events.some((e) => e.type === 'SUPPLIER_CLOSED_MANUALLY' && e.payload.supplier === 'Silent Supply'));
+    assert.ok(r.events.some((e) => e.type === 'QUOTE_ENTERED_MANUALLY' && e.payload.price === 840));
+
+    assert.equal((await api.post(`/requests/${request.id}/suppliers/${silentId}/close`, {})).status, 409);
+  });
+
+  test('a lower price after a final offer updates the recommendation without sending email', async () => {
+    const { request } = await seedRequest({ suppliers: [{ name: 'Alpha Foods', email: 'sales@alpha.example.com', score: 90 }] });
+    await api.post(`/requests/${request.id}/send-proposals`, {});
+    await drain();
+    let r = await getRequest(request.id);
+    const alpha = threadOf(r, 'Alpha Foods');
+    await api.post(`/requests/${request.id}/suppliers/${alpha.id}/quote`, { unit_price: 840, delivery_days: 10 });
+    await drain();
+    r = await getRequest(request.id);
+    assert.equal(r.status, 'DEAL_RECOMMENDED');
+    const outboundBefore = await count(`SELECT 1 FROM messages WHERE direction = 'outbound'`);
+
+    const reply = (text) => api.post('/webhooks/email', { from: 'sales@alpha.example.com', subject: `Re: ${alpha.rfq_ref}`, text });
+    await reply('This is our final offer. Price: USD 830 per tonne');
+    await drain();
+    r = await getRequest(request.id);
+    let a = threadOf(r, 'Alpha Foods');
+    assert.equal(a.current_offer_price, 830);
+    assert.equal(a.offers.at(-1).delivery_days, 10, 'delivery carried over from the earlier offer');
+    assert.equal(r.status, 'DEAL_RECOMMENDED');
+    assert.equal(r.recommendation.ranked[0].price, 830);
+    assert.ok(r.events.some((e) => e.type === 'OFFER_IMPROVED' && e.payload.price === 830));
+    assert.ok(r.events.some((e) => e.type === 'RECOMMENDATION_UPDATED'));
+    assert.equal(await count(`SELECT 1 FROM messages WHERE direction = 'outbound'`), outboundBefore, 'no email sent');
+
+    await reply('Price: USD 900 per tonne');
+    await drain();
+    a = threadOf(await getRequest(request.id), 'Alpha Foods');
+    assert.equal(a.current_offer_price, 830, 'a higher price is ignored');
+    assert.equal(a.lower_quote, null);
+
+    // A lower quote that an older version ignored is applied by re-check.
+    await query(
+      `INSERT INTO messages (request_supplier_id, direction, kind, subject, body, delivery_status, processed_at, parsed_json)
+       VALUES ($1, 'inbound', 'REPLY', 'Re: quote', 'Price: USD 820 per tonne', 'RECEIVED', now(), '{"unit_price": 820}')`,
+      [alpha.id],
+    );
+    a = threadOf(await getRequest(request.id), 'Alpha Foods');
+    assert.equal(a.lower_quote.unit_price, 820);
+    assert.equal((await api.post(`/requests/${request.id}/suppliers/${alpha.id}/recheck`, {})).status, 202);
+    await drain();
+    r = await getRequest(request.id);
+    a = threadOf(r, 'Alpha Foods');
+    assert.equal(a.current_offer_price, 820);
+    assert.equal(a.lower_quote, null);
+    assert.equal(r.recommendation.ranked[0].price, 820);
+    assert.equal((await api.post(`/requests/${request.id}/suppliers/${alpha.id}/recheck`, {})).status, 409, 'nothing lower left to apply');
+  });
+});
+
+describe('approving recipients from the UI', () => {
+  test('an approved address can be emailed; removing it blocks it again', async () => {
+    const transport = useSmtpLikeTransport(['env.listed@tempmail.test']);
+    const { request } = await seedRequest({ suppliers: [{ name: 'Raja Suppliers', email: 'raja@gmail.test', score: 80 }] });
+    let r = await getRequest(request.id);
+    assert.equal(threadOf(r, 'Raja Suppliers').can_email, false);
+
+    const allow = await api.post('/email-allowlist', { email: 'Raja@Gmail.test', requestId: request.id });
+    assert.equal(allow.status, 201);
+    assert.deepEqual(allow.body, { email: 'raja@gmail.test', created: true });
+    assert.equal((await api.post('/email-allowlist', { email: 'raja@gmail.test' })).status, 200, 'approving twice is harmless');
+
+    r = await getRequest(request.id);
+    assert.equal(threadOf(r, 'Raja Suppliers').can_email, true);
+    assert.ok(r.events.some((e) => e.type === 'RECIPIENT_ALLOWED' && e.payload.email === 'raja@gmail.test'));
+
+    const send = await api.post(`/requests/${request.id}/send-proposals`, {});
+    assert.equal(send.status, 202);
+    await drain();
+    assert.deepEqual(transport.sent.map((m) => m.to), ['raja@gmail.test']);
+
+    // Listing shows both sources; .env entries cannot be removed from the UI.
+    const list = await api.get('/email-allowlist');
+    assert.deepEqual(
+      list.body.entries.map((e) => `${e.source}:${e.email}`).sort(),
+      ['env:env.listed@tempmail.test', 'ui:raja@gmail.test'],
+    );
+    assert.equal((await api.delete('/email-allowlist/env.listed%40tempmail.test')).status, 409);
+
+    const removed = await api.delete('/email-allowlist/raja%40gmail.test');
+    assert.deepEqual(removed.body, { email: 'raja@gmail.test', removed: true });
+    assert.equal(threadOf(await getRequest(request.id), 'Raja Suppliers').can_email, false);
+    assert.equal((await api.delete('/email-allowlist/raja%40gmail.test')).status, 404);
+  });
+
+  test('approvals survive a restart and invalid emails are refused', async () => {
+    useSmtpLikeTransport([]);
+    config.email.allowedRecipients = ['x@env.test'];
+    assert.equal((await api.post('/email-allowlist', { email: 'not-an-email' })).status, 400);
+    await api.post('/email-allowlist', { email: 'keep@gmail.test' });
+
+    const { resetAllowlistCache, loadAllowlist, isUiAllowed } = await import('../src/services/emailAllowlist.js');
+    resetAllowlistCache();
+    assert.equal(isUiAllowed('keep@gmail.test'), false, 'cache cleared, like a fresh process');
+    await loadAllowlist();
+    assert.equal(isUiAllowed('KEEP@gmail.test'), true);
+  });
+});
+
+describe('inviting more suppliers after proposals were sent', () => {
+  // Alpha was emailed first; Lohiya was found online without an email (like a Tavily result).
+  async function quotingRequest() {
+    const { request, threads } = await seedRequest({
+      suppliers: [
+        { name: 'Alpha Foods', email: 'sales@alpha.example.com', score: 90 },
+        { name: 'Lohiya Industries', email: null, website: 'https://golddropindia.com', score: 95 },
+      ],
+    });
+    const [alpha, lohiya] = threads;
+    assert.equal((await api.post(`/requests/${request.id}/send-proposals`, { requestSupplierIds: [alpha.id] })).status, 202);
+    await drain();
+    assert.equal((await getRequest(request.id)).status, 'AWAITING_REPLIES');
+    return { requestId: request.id, alpha, lohiya };
+  }
+
+  test('a found supplier gets a test email for this request and is invited late', async () => {
+    const { requestId, alpha, lohiya } = await quotingRequest();
+
+    const set = await api.patch(`/requests/${requestId}/suppliers/${lohiya.id}`, { email: 'My.Test@TempMail.test' });
+    assert.equal(set.status, 200);
+    assert.deepEqual([set.body.email, set.body.can_email], ['my.test@tempmail.test', true]);
+
+    let r = await getRequest(requestId);
+    const l = threadOf(r, 'Lohiya Industries');
+    assert.deepEqual([l.email, l.original_email, l.email_overridden], ['my.test@tempmail.test', null, true]);
+    assert.ok(r.events.some((e) => e.type === 'SUPPLIER_EMAIL_SET' && e.payload.supplier === 'Lohiya Industries'));
+
+    const res = await api.post(`/requests/${requestId}/send-proposals`, { requestSupplierIds: [lohiya.id] });
+    assert.equal(res.status, 202);
+    assert.equal((await getRequest(requestId)).status, 'AWAITING_REPLIES', 'late invites do not restart the workflow');
+    await drain();
+
+    r = await getRequest(requestId);
+    const invited = threadOf(r, 'Lohiya Industries');
+    assert.equal(invited.status, 'CONTACTED');
+    assert.match(invited.rfq_ref, /-02$/, 'references continue after the ones already used');
+    assert.equal(threadOf(r, 'Alpha Foods').rfq_ref.slice(-3), '-01');
+    const rfq = (await query(`SELECT to_email FROM messages WHERE request_supplier_id = $1 AND kind = 'RFQ'`, [lohiya.id])).rows[0];
+    assert.equal(rfq.to_email, 'my.test@tempmail.test');
+    assert.ok(r.events.some((e) => e.type === 'PROPOSALS_QUEUED' && e.payload.late === true));
+
+    // Already contacted suppliers cannot be invited again or have their email changed.
+    const again = await api.post(`/requests/${requestId}/send-proposals`, { requestSupplierIds: [alpha.id] });
+    assert.equal(again.status, 400);
+    assert.match(again.body.error, /Already contacted: Alpha Foods/);
+    assert.equal((await api.patch(`/requests/${requestId}/suppliers/${alpha.id}`, { email: 'x@y.test' })).status, 409);
+  });
+
+  test('replies from the test address are matched, counters go to it, and the deal waits for late suppliers', async () => {
+    const { requestId, lohiya } = await quotingRequest();
+    await api.patch(`/requests/${requestId}/suppliers/${lohiya.id}`, { email: 'my.test@tempmail.test' });
+    await api.post(`/requests/${requestId}/send-proposals`, { requestSupplierIds: [lohiya.id] });
+    await drain();
+
+    // Alpha quotes at target: its negotiation is done, but Lohiya is still pending, so no recommendation yet.
+    const alphaRef = threadOf(await getRequest(requestId), 'Alpha Foods').rfq_ref;
+    await api.post('/webhooks/email', { from: 'sales@alpha.example.com', subject: `Re: ${alphaRef}`, text: 'Price: USD 845.00 per tonne' });
+    await drain();
+    let r = await getRequest(requestId);
+    assert.equal(threadOf(r, 'Alpha Foods').status, 'FINAL_OFFER');
+    assert.notEqual(r.status, 'DEAL_RECOMMENDED');
+
+    // Lohiya replies from the test inbox without the reference: matched by sender, countered at that address.
+    const reply = await api.post('/webhooks/email', { from: 'my.test@tempmail.test', subject: 'Our quote', text: 'Price: USD 1,000.00 per tonne' });
+    assert.equal(reply.body.matched, true);
+    await drain();
+    r = await getRequest(requestId);
+    assert.equal(threadOf(r, 'Lohiya Industries').current_offer_price, 1000);
+    const counter = (await query(`SELECT to_email FROM messages WHERE request_supplier_id = $1 AND kind = 'COUNTER'`, [lohiya.id])).rows[0];
+    assert.equal(counter.to_email, 'my.test@tempmail.test');
+
+    // Lohiya accepts the counter → everyone is final → recommendation.
+    await api.post('/webhooks/email', { from: 'my.test@tempmail.test', subject: 'Re: counter', text: 'We accept your counter-offer of USD 824.50 per tonne' });
+    await drain();
+    assert.equal((await getRequest(requestId)).status, 'DEAL_RECOMMENDED');
+  });
+
+  test('a supplier can be added while quotes are coming in, but not once a deal is recommended', async () => {
+    const { requestId } = await quotingRequest();
+    const added = await api.post(`/requests/${requestId}/suppliers`, { name: 'Late Supplier', email: 'late@tempmail.test' });
+    assert.equal(added.status, 201);
+    assert.equal(threadOf(await getRequest(requestId), 'Late Supplier').status, 'PENDING');
+
+    const { request: done, threads } = await seedRequest({ status: 'DEAL_RECOMMENDED' });
+    assert.equal((await api.patch(`/requests/${done.id}/suppliers/${threads[0].id}`, { email: 'a@b.test' })).status, 409);
+  });
+
+  test('email changes respect the allowlist and validate input', async () => {
+    useSmtpLikeTransport(['allowed@tempmail.test']);
+    const { request, threads } = await seedRequest({
+      suppliers: [{ name: 'Lohiya Industries', email: null, website: 'https://golddropindia.com', score: 95 }],
+    });
+    const lohiya = threads[0];
+    const blocked = await api.patch(`/requests/${request.id}/suppliers/${lohiya.id}`, { email: 'other@tempmail.test' });
+    assert.equal(blocked.body.can_email, false);
+    const allowed = await api.patch(`/requests/${request.id}/suppliers/${lohiya.id}`, { email: 'allowed@tempmail.test' });
+    assert.equal(allowed.body.can_email, true);
+    assert.equal((await api.patch(`/requests/${request.id}/suppliers/${lohiya.id}`, { email: 'not-an-email' })).status, 400);
+
+    const cleared = await api.patch(`/requests/${request.id}/suppliers/${lohiya.id}`, { email: '' });
+    assert.deepEqual([cleared.body.email, cleared.body.can_email], [null, false]);
+  });
+
+  test('adding a known email again shows the newly typed name', async () => {
+    const { request: first } = await seedRequest();
+    await api.post(`/requests/${first.id}/suppliers`, { name: 'Habibi', email: 'kahava@tempmail.test' });
+    const { request: second } = await seedRequest();
+    await api.post(`/requests/${second.id}/suppliers`, { name: "Khan's Suppliers", email: 'kahava@tempmail.test' });
+    assert.ok(threadOf(await getRequest(second.id), "Khan's Suppliers"));
   });
 });
 

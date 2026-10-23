@@ -8,12 +8,15 @@ import {
   CreateRequestSchema,
   RejectDealsSchema,
   SendProposalsSchema,
+  ManualQuoteSchema,
+  SupplierEmailSchema,
 } from '../validation/request.js';
 import { upsertSupplier } from '../workflow/jobs/discoverSuppliers.js';
 import { approveDeal, rejectDeals } from '../workflow/approval.js';
 import { enqueue, enqueueDeliveries, JOBS } from '../workflow/queue.js';
-import { queueProposals } from '../workflow/sendProposals.js';
-import { lockRequest, logEvent, RequestStatus, transition } from '../workflow/stateMachine.js';
+import { LATE_INVITE_STATUSES, queueProposals } from '../workflow/sendProposals.js';
+import { closeWaitingThread } from '../workflow/jobs/replyTimeout.js';
+import { lockRequest, logEvent, RequestStatus, ThreadStatus, transition } from '../workflow/stateMachine.js';
 
 export const requestsRouter = Router();
 
@@ -92,8 +95,10 @@ requestsRouter.get(
       query(
         `SELECT rs.id, rs.status, rs.selected, rs.rfq_ref, rs.relevance_score, rs.ai_reasoning,
                 rs.opening_price, rs.current_offer_price, rs.rounds_used, rs.final_reason, rs.last_error,
-                rs.last_contacted_at, s.id AS supplier_id, s.name, s.email, s.phone, s.website, s.location,
-                s.description, s.source_url
+                rs.last_contacted_at, s.id AS supplier_id, s.name,
+                COALESCE(rs.contact_email, s.email) AS email, s.email AS original_email,
+                (rs.contact_email IS NOT NULL) AS email_overridden,
+                s.phone, s.website, s.location, s.description, s.source_url
            FROM request_suppliers rs
            JOIN suppliers s ON s.id = rs.supplier_id
           WHERE rs.request_id = $1
@@ -123,6 +128,15 @@ requestsRouter.get(
     const byThread = (rows) => (threadId) => rows.filter((r) => r.request_supplier_id === threadId);
     const messagesOf = byThread(messages.rows);
     const offersOf = byThread(offers.rows);
+    const usedMessageIds = new Set(offers.rows.map((o) => o.message_id));
+    // A lower price in a reply that arrived after the offer went final (can be applied with recheck).
+    const lowerQuoteOf = (s) => {
+      if (s.status !== 'FINAL_OFFER' || s.current_offer_price == null) return null;
+      const m = messagesOf(s.id)
+        .filter((m) => m.direction === 'inbound' && !usedMessageIds.has(m.id) && Number(m.parsed_json?.unit_price) < s.current_offer_price)
+        .at(-1);
+      return m ? { message_id: m.id, unit_price: Number(m.parsed_json.unit_price), received_at: m.created_at } : null;
+    };
 
     res.json({
       ...request.rows[0],
@@ -132,23 +146,30 @@ requestsRouter.get(
         can_email: recipientAllowed(s.email),
         messages: messagesOf(s.id),
         offers: offersOf(s.id),
+        lower_quote: lowerQuoteOf(s),
       })),
       events: events.rows,
     });
   }),
 );
 
-/** Adds a supplier by hand (e.g. a Temp Mail test address) while suppliers are being chosen. */
+// Suppliers can be added (and given an email) while choosing suppliers or while quotes are still coming in.
+const SUPPLIER_EDIT_STATUSES = [RequestStatus.SUPPLIERS_FOUND, ...LATE_INVITE_STATUSES];
+
+function assertCanEditSuppliers(request) {
+  if (!SUPPLIER_EDIT_STATUSES.includes(request.status)) {
+    throw new HttpError(409, `Suppliers can only be changed until a deal is recommended (request is ${request.status})`);
+  }
+}
+
+/** Adds a supplier by hand (e.g. a Temp Mail test address), before or after the first proposals are sent. */
 requestsRouter.post(
   '/:id/suppliers',
   asyncRoute(async (req, res) => {
     const { id } = req.params;
     const d = AddSupplierSchema.parse(req.body ?? {});
     const threadId = await withTransaction(async (client) => {
-      const request = await lockRequest(client, id);
-      if (request.status !== RequestStatus.SUPPLIERS_FOUND) {
-        throw new HttpError(409, `Suppliers can only be added before proposals are sent (request is ${request.status})`);
-      }
+      assertCanEditSuppliers(await lockRequest(client, id));
       const supplierId = await upsertSupplier(client, {
         name: d.name,
         email: d.email,
@@ -158,6 +179,8 @@ requestsRouter.post(
         description: null,
         source_url: null,
       });
+      // An existing address keeps its supplier record; show the name that was just typed.
+      await client.query('UPDATE suppliers SET name = $2, updated_at = now() WHERE id = $1', [supplierId, d.name]);
       const { rows } = await client.query(
         `INSERT INTO request_suppliers (request_id, supplier_id, ai_reasoning) VALUES ($1, $2, 'Added manually')
          ON CONFLICT (request_id, supplier_id) DO NOTHING RETURNING id`,
@@ -168,6 +191,185 @@ requestsRouter.post(
       return rows[0].id;
     });
     res.status(201).json({ id: threadId, can_email: recipientAllowed(d.email) });
+  }),
+);
+
+/**
+ * Sets (or clears, with email: null) the email used for one supplier on this request only,
+ * e.g. a test inbox for a supplier found online without an address. Not after it was contacted.
+ */
+requestsRouter.patch(
+  '/:id/suppliers/:threadId',
+  asyncRoute(async (req, res) => {
+    const { id, threadId } = req.params;
+    if (!UUID_RE.test(threadId)) throw new NotFoundError('Supplier not found');
+    const { email } = SupplierEmailSchema.parse(req.body ?? {});
+
+    const result = await withTransaction(async (client) => {
+      assertCanEditSuppliers(await lockRequest(client, id));
+      const { rows: [thread] } = await client.query(
+        `SELECT rs.id, rs.status, s.name, s.email AS original_email
+           FROM request_suppliers rs JOIN suppliers s ON s.id = rs.supplier_id
+          WHERE rs.id = $1 AND rs.request_id = $2
+          FOR UPDATE OF rs`,
+        [threadId, id],
+      );
+      if (!thread) throw new NotFoundError('Supplier not found');
+      if (thread.status !== 'PENDING') {
+        throw new HttpError(409, `${thread.name} has already been contacted; its email can no longer be changed`);
+      }
+      await client.query('UPDATE request_suppliers SET contact_email = $2, updated_at = now() WHERE id = $1', [threadId, email]);
+      const effective = email ?? thread.original_email;
+      await logEvent(client, id, 'SUPPLIER_EMAIL_SET', {
+        supplier: thread.name,
+        email: effective,
+        overridden: Boolean(email),
+        canEmail: recipientAllowed(effective),
+      });
+      return { email: effective, can_email: recipientAllowed(effective) };
+    });
+    res.json({ id: threadId, ...result });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Recovery tools while quotes are coming in (real email: unreadable replies, silent suppliers).
+
+/** Loads one supplier thread of a request (locked) and checks the request is still collecting quotes. */
+async function lockQuotingThread(client, requestId, threadId, allowed = LATE_INVITE_STATUSES) {
+  if (!UUID_RE.test(threadId)) throw new NotFoundError('Supplier not found');
+  const { rows: [thread] } = await client.query(
+    `SELECT rs.*, s.name AS supplier_name, r.status AS request_status, r.currency
+       FROM request_suppliers rs
+       JOIN suppliers s ON s.id = rs.supplier_id
+       JOIN sourcing_requests r ON r.id = rs.request_id
+      WHERE rs.id = $1 AND rs.request_id = $2
+      FOR UPDATE OF rs`,
+    [threadId, requestId],
+  );
+  if (!thread) throw new NotFoundError('Supplier not found');
+  if (!allowed.includes(thread.request_status)) {
+    throw new HttpError(409, `This is only possible while quotes are being collected (request is ${thread.request_status})`);
+  }
+  return thread;
+}
+
+// A lower final offer can still be applied after the recommendation, until a deal is approved.
+const RECHECK_STATUSES = [...LATE_INVITE_STATUSES, RequestStatus.DEAL_RECOMMENDED];
+
+// A thread parked for review goes back to waiting for the reply it was on.
+const reopenStatus = (thread) => (thread.rounds_used > 0 ? ThreadStatus.COUNTERED : ThreadStatus.CONTACTED);
+
+/**
+ * Re-reads a supplier's replies: the newest priced reply of a supplier that needs review, or a
+ * newer, lower quote that arrived after their offer went final.
+ */
+requestsRouter.post(
+  '/:id/suppliers/:threadId/recheck',
+  asyncRoute(async (req, res) => {
+    const { id, threadId } = req.params;
+    const messageId = await withTransaction(async (client) => {
+      const thread = await lockQuotingThread(client, id, threadId, RECHECK_STATUSES);
+
+      // A final offer can still be lowered by a later reply (applied by processReply, no email sent).
+      if (thread.status === ThreadStatus.FINAL_OFFER) {
+        const { rows: [lower] } = await client.query(
+          `SELECT m.id FROM messages m
+            WHERE m.request_supplier_id = $1 AND m.direction = 'inbound'
+              AND (m.parsed_json->>'unit_price')::numeric < $2
+              AND NOT EXISTS (SELECT 1 FROM offers o WHERE o.message_id = m.id)
+            ORDER BY m.created_at DESC LIMIT 1`,
+          [threadId, thread.current_offer_price],
+        );
+        if (!lower) throw new HttpError(409, `No newer, lower quote from ${thread.supplier_name} to apply`);
+        await client.query('UPDATE messages SET processed_at = NULL WHERE id = $1', [lower.id]);
+        await logEvent(client, id, 'REPLIES_RECHECKED', { supplier: thread.supplier_name });
+        return lower.id;
+      }
+
+      if (thread.status !== ThreadStatus.NEEDS_REVIEW || thread.request_status === RequestStatus.DEAL_RECOMMENDED) {
+        throw new HttpError(409, `Only suppliers that need review can be re-checked (${thread.supplier_name} is ${thread.status})`);
+      }
+      // Prefer the newest reply that contains a price; a later "thanks"/total-only reply must not hide it.
+      const { rows: [latest] } = await client.query(
+        `SELECT id FROM messages WHERE request_supplier_id = $1 AND direction = 'inbound'
+          ORDER BY (parsed_json->>'unit_price') IS NOT NULL DESC, created_at DESC LIMIT 1`,
+        [threadId],
+      );
+      if (!latest) throw new HttpError(409, `${thread.supplier_name} has not replied yet`);
+      await client.query('UPDATE request_suppliers SET status = $2, final_reason = NULL, updated_at = now() WHERE id = $1', [
+        threadId,
+        reopenStatus(thread),
+      ]);
+      await client.query('UPDATE messages SET processed_at = NULL WHERE id = $1', [latest.id]);
+      await logEvent(client, id, 'REPLIES_RECHECKED', { supplier: thread.supplier_name });
+      return latest.id;
+    });
+    await enqueue(JOBS.PROCESS_REPLY, { messageId, requestId: id });
+    res.status(202).json({ id: threadId, messageId });
+  }),
+);
+
+/** Records a quote typed in by the buyer; it then follows the normal negotiation path. */
+requestsRouter.post(
+  '/:id/suppliers/:threadId/quote',
+  asyncRoute(async (req, res) => {
+    const { id, threadId } = req.params;
+    const q = ManualQuoteSchema.parse(req.body ?? {});
+    const messageId = await withTransaction(async (client) => {
+      const thread = await lockQuotingThread(client, id, threadId);
+      const allowed = [ThreadStatus.CONTACTED, ThreadStatus.COUNTERED, ThreadStatus.NEEDS_REVIEW];
+      if (!allowed.includes(thread.status)) {
+        throw new HttpError(409, `A quote can only be entered while waiting for ${thread.supplier_name}'s reply (status ${thread.status})`);
+      }
+      if (thread.status === ThreadStatus.NEEDS_REVIEW) {
+        await client.query('UPDATE request_suppliers SET status = $2, final_reason = NULL WHERE id = $1', [threadId, reopenStatus(thread)]);
+      }
+      const body = [
+        'Quote entered manually by the buyer:',
+        `Price: ${thread.currency} ${q.unit_price} per unit`,
+        q.delivery_days ? `Delivery: within ${q.delivery_days} days` : null,
+        q.payment_terms ? `Payment terms: ${q.payment_terms}` : null,
+      ]
+        .filter(Boolean)
+        .join('\n');
+      const parsed = {
+        manual: true,
+        parser: 'manual',
+        declined: false,
+        unit_price: q.unit_price,
+        currency: thread.currency,
+        delivery_days: q.delivery_days ?? null,
+        payment_terms: q.payment_terms ?? null,
+        validity_days: null,
+        is_final: false,
+        accepts_counter: false,
+      };
+      const { rows: [msg] } = await client.query(
+        `INSERT INTO messages (request_supplier_id, direction, kind, subject, body, delivery_status, parsed_json)
+         VALUES ($1, 'inbound', 'REPLY', 'Manual quote', $2, 'RECEIVED', $3) RETURNING id`,
+        [threadId, body, parsed],
+      );
+      await logEvent(client, id, 'QUOTE_ENTERED_MANUALLY', { supplier: thread.supplier_name, price: q.unit_price });
+      return msg.id;
+    });
+    await enqueue(JOBS.PROCESS_REPLY, { messageId, requestId: id });
+    res.status(202).json({ id: threadId, messageId });
+  }),
+);
+
+/** "Mark as no response": closes a supplier that is still waiting, like the reply timeout would. */
+requestsRouter.post(
+  '/:id/suppliers/:threadId/close',
+  asyncRoute(async (req, res) => {
+    const { id, threadId } = req.params;
+    const status = await withTransaction(async (client) => {
+      const thread = await lockQuotingThread(client, id, threadId);
+      const closed = await closeWaitingThread(client, threadId, { manual: true });
+      if (!closed) throw new HttpError(409, `${thread.supplier_name} is not waiting for a reply (status ${thread.status})`);
+      return closed;
+    });
+    res.json({ id: threadId, status });
   }),
 );
 

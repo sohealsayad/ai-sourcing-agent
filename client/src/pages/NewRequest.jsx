@@ -173,7 +173,7 @@ export default function NewRequest() {
           </div>
         </form>
 
-        <aside className="sticky top-24 space-y-5">
+        <aside className="sticky top-20 space-y-5">
           <div className="card p-5">
             <h3 className="text-sm font-semibold text-slate-900">Summary</h3>
             <dl className="mt-4 space-y-3 text-sm">

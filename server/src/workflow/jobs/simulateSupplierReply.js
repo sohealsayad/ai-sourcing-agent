@@ -12,7 +12,7 @@ const AWAITING = [ThreadStatus.CONTACTED, ThreadStatus.COUNTERED];
 export async function simulateSupplierReply(job) {
   const { threadId, round } = job.data;
   const { rows } = await query(
-    `SELECT rs.*, s.name AS supplier_name, s.email,
+    `SELECT rs.*, s.name AS supplier_name, COALESCE(rs.contact_email, s.email) AS email,
             r.commodity, r.quantity, r.unit, r.currency, r.location, r.target_price, r.buyer_name
        FROM request_suppliers rs
        JOIN suppliers s ON s.id = rs.supplier_id

@@ -41,7 +41,7 @@ export async function ingestInboundEmail({ from, subject = '', body, messageId =
     if (!thread && from) {
       ({ rows: [thread] } = await client.query(
         `SELECT rs.id, rs.request_id, s.name FROM request_suppliers rs JOIN suppliers s ON s.id = rs.supplier_id
-          WHERE lower(s.email) = lower($1) AND rs.status IN ('CONTACTED', 'COUNTERED')
+          WHERE lower(COALESCE(rs.contact_email, s.email)) = lower($1) AND rs.status IN ('CONTACTED', 'COUNTERED')
           ORDER BY rs.last_contacted_at DESC NULLS LAST LIMIT 1`,
         [from],
       ));

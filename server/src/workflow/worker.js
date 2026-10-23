@@ -43,23 +43,25 @@ async function threadNeedsReview(job, err) {
  * Wraps a job handler: passes `isFinalAttempt`, logs failures and, once retries are
  * exhausted, runs `onFinalFailure` so nothing hangs in an in-progress state.
  */
-function handle(name, fn, onFinalFailure) {
+export function handle(name, fn, onFinalFailure) {
   return async ([job]) => {
     const retryCount = job.retryCount ?? 0;
     const isFinalAttempt = retryCount >= (job.retryLimit ?? RETRY_LIMIT);
     try {
       await fn(job, { isFinalAttempt });
     } catch (err) {
+      // Errors marked permanent (bad API key, retired model, ...) can never succeed: stop now.
+      const final = isFinalAttempt || Boolean(err.permanent);
       console.error(`[${name}] job ${job.id} attempt ${retryCount + 1} failed:`, err.message);
       if (job.data.requestId) {
         await logEvent(pool, job.data.requestId, 'JOB_FAILED', {
           job: name,
           attempt: retryCount + 1,
-          final: isFinalAttempt,
+          final,
           error: err.message,
         });
       }
-      if (!isFinalAttempt || !onFinalFailure) throw err; // let pg-boss retry with backoff
+      if (!final || !onFinalFailure) throw err; // let pg-boss retry with backoff
       await onFinalFailure(job, err);
     }
   };

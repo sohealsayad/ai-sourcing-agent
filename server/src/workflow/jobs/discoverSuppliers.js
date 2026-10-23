@@ -40,7 +40,7 @@ export async function discoverSuppliers(job) {
   if (!request || request.status !== RequestStatus.DISCOVERING) return;
 
   await logEvent(pool, requestId, 'DISCOVERY_STARTED', { attempt: (job.retryCount ?? 0) + 1 });
-  const { suppliers, searchQueries, mode, usage } = await findSuppliers(request);
+  const { suppliers, searchQueries, mode, usage, searchError } = await findSuppliers(request);
 
   await withTransaction(async (client) => {
     for (const s of suppliers) {
@@ -58,6 +58,7 @@ export async function discoverSuppliers(job) {
       mode,
       count: suppliers.length,
       searchQueries,
+      ...(searchError && { searchError }),
       ...(usage && { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens }),
     });
 

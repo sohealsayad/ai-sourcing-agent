@@ -130,12 +130,22 @@ describe('send proposals: success', () => {
 });
 
 describe('send proposals: invalid requests', () => {
-  for (const status of ['DISCOVERING', 'AWAITING_REPLIES', 'NEGOTIATING', 'CLOSED']) {
+  for (const status of ['DISCOVERING', 'DEAL_RECOMMENDED', 'CLOSED']) {
     test(`rejects sending while the request is ${status}`, async () => {
       const { request } = await seedRequest({ status });
       const res = await send(request.id);
       assert.equal(res.status, 409);
       assert.match(res.body.error, new RegExp(`from ${status}`));
+      assert.equal((await rfqRows(request.id)).length, 0);
+    });
+  }
+
+  for (const status of ['AWAITING_REPLIES', 'NEGOTIATING']) {
+    test(`while ${status}, more suppliers can only be invited by explicit choice`, async () => {
+      const { request } = await seedRequest({ status });
+      const res = await send(request.id);
+      assert.equal(res.status, 400);
+      assert.match(res.body.error, /Choose which suppliers to invite/);
       assert.equal((await rfqRows(request.id)).length, 0);
     });
   }

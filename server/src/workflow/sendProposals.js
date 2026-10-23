@@ -7,6 +7,9 @@ import { lockRequest, logEvent, RequestStatus, ThreadStatus, transition } from '
 
 const S = RequestStatus;
 
+/** Statuses in which more suppliers can still be added and invited. */
+export const LATE_INVITE_STATUSES = [S.AWAITING_REPLIES, S.NEGOTIATING];
+
 /**
  * Step 3: selects suppliers and writes one RFQ per supplier to the outbox.
  *
@@ -21,7 +24,7 @@ export async function queueProposals(requestId, requestSupplierIds) {
   return withTransaction(async (client) => {
     const request = await lockRequest(client, requestId);
     const { rows: all } = await client.query(
-      `SELECT rs.id, rs.status, rs.selected, rs.rfq_ref, s.name, s.email
+      `SELECT rs.id, rs.status, rs.selected, rs.rfq_ref, s.name, COALESCE(rs.contact_email, s.email) AS email
          FROM request_suppliers rs
          JOIN suppliers s ON s.id = rs.supplier_id
         WHERE rs.request_id = $1
@@ -44,13 +47,23 @@ export async function queueProposals(requestId, requestSupplierIds) {
       threads = all.filter((t) => t.selected && [ThreadStatus.SEND_FAILED, ThreadStatus.QUEUED].includes(t.status));
       // A request that failed during discovery has nothing to resend.
       if (!threads.length) throw new InvalidTransitionError(request.status, S.SENDING_PROPOSALS);
+    } else if (LATE_INVITE_STATUSES.includes(request.status)) {
+      // Inviting more suppliers while others are already quoting: explicit choice only.
+      if (!requestSupplierIds) throw new HttpError(400, 'Choose which suppliers to invite');
+      threads = pickThreads(all, requestSupplierIds);
+      const contacted = threads.filter((t) => t.status !== ThreadStatus.PENDING);
+      if (contacted.length) {
+        throw new HttpError(400, `Already contacted: ${contacted.map((t) => t.name).join(', ')}`);
+      }
     } else {
       throw new InvalidTransitionError(request.status, S.SENDING_PROPOSALS);
     }
 
+    // References continue from the highest one used, so suppliers added later never reuse a number.
+    let nextRef = Math.max(0, ...all.map((t) => Number(t.rfq_ref?.split('-').pop()) || 0)) + 1;
     const messageIds = [];
     for (const t of threads) {
-      const rfqRef = t.rfq_ref ?? makeRfqRef(requestId, all.indexOf(t) + 1);
+      const rfqRef = t.rfq_ref ?? makeRfqRef(requestId, nextRef++);
       await client.query(
         `UPDATE request_suppliers
             SET selected = true, status = $2, rfq_ref = $3, last_error = NULL, updated_at = now()
@@ -71,12 +84,15 @@ export async function queueProposals(requestId, requestSupplierIds) {
       if (rows[0].delivery_status === 'PENDING') messageIds.push(rows[0].id);
     }
 
+    const late = LATE_INVITE_STATUSES.includes(request.status);
     const retry = request.status === S.FAILED;
-    await transition(client, requestId, S.SENDING_PROPOSALS, { meta: { suppliers: threads.length, retry } });
+    // Late invitations keep the request where it is; the recommendation waits for them anyway.
+    if (!late) await transition(client, requestId, S.SENDING_PROPOSALS, { meta: { suppliers: threads.length, retry } });
     await logEvent(client, requestId, 'PROPOSALS_QUEUED', {
       count: threads.length,
       suppliers: threads.map((t) => t.name),
       retry,
+      ...(late && { late: true }),
     });
     // If every RFQ was already delivered there is nothing to wait for.
     await syncRequestStatus(client, requestId);

@@ -1,7 +1,65 @@
 import { useState } from 'react';
-import { formatDateTime } from '../lib/format.js';
 import StatusBadge from './StatusBadge.jsx';
-import { Icon } from './ui.jsx';
+import { Icon, Spinner } from './ui.jsx';
+
+/** Inline editor for the email used for this supplier on this request (e.g. your test inbox). */
+function EmailEditor({ supplier, onSave, onAllow, onDone }) {
+  const [value, setValue] = useState(supplier.email_overridden ? supplier.email : '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const save = async (email) => {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await onSave(supplier.id, email);
+      // With real email, offer to approve an address that is not allowed yet.
+      if (email && res?.can_email === false && onAllow) await onAllow(email, supplier.id);
+      onDone();
+    } catch (err) {
+      setError(err.fields?.email ?? err.message);
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form
+      className="mt-3 rounded-lg bg-slate-50 p-3 ring-1 ring-slate-200 ring-inset"
+      onSubmit={(e) => {
+        e.preventDefault();
+        save(value.trim());
+      }}
+    >
+      <label className="mb-1.5 block text-xs font-medium text-slate-600" htmlFor={`email-${supplier.id}`}>
+        Email to use for {supplier.name} on this request
+      </label>
+      <div className="flex items-center gap-2">
+        <input
+          id={`email-${supplier.id}`}
+          type="email"
+          autoFocus
+          className="field-input max-w-80"
+          placeholder="you@example.com"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+        />
+        <button className="btn-primary px-3 py-1.5" disabled={saving || !value.trim()}>
+          {saving ? <Spinner /> : <Icon name="check" />} Save
+        </button>
+        {supplier.email_overridden && (
+          <button type="button" className="btn-ghost px-3 py-1.5" disabled={saving} onClick={() => save(null)}>
+            Use original
+          </button>
+        )}
+        <button type="button" className="btn-ghost px-3 py-1.5" disabled={saving} onClick={onDone}>
+          Cancel
+        </button>
+      </div>
+      {error && <p className="field-error">{error}</p>}
+      <p className="field-hint">Only for this request. With real email you will be asked to allow the address if it is not approved yet.</p>
+    </form>
+  );
+}
 
 function ScoreBar({ score }) {
   const value = Math.round(score ?? 0);
@@ -33,89 +91,24 @@ const initials = (name) =>
     .map((w) => w[0].toUpperCase())
     .join('');
 
-const KIND_LABELS = {
-  RFQ: 'Request for quotation',
-  COUNTER: 'Counter-offer',
-  ACCEPTANCE: 'Acceptance',
-  REGRET: 'Regret note',
-  REPLY: 'Supplier reply',
-};
-
-const DELIVERY = {
-  PENDING: ['Sending…', 'text-brand-600'],
-  SENT: ['Sent', 'text-emerald-600'],
-  FAILED: ['Failed', 'text-red-600'],
-  RECEIVED: ['Received', 'text-slate-500'],
-};
-
-function Message({ m }) {
-  const outbound = m.direction === 'outbound';
-  const [expanded, setExpanded] = useState(false);
-  const [label, cls] = DELIVERY[m.delivery_status] ?? [m.delivery_status, 'text-slate-500'];
-  const long = m.body.length > 600;
-
-  return (
-    <li className={`flex ${outbound ? 'justify-end' : 'justify-start'}`}>
-      <div
-        className={`w-full max-w-[85%] rounded-2xl border px-4 py-3 ${
-          outbound ? 'rounded-tr-sm border-brand-100 bg-brand-50/60' : 'rounded-tl-sm border-slate-200 bg-white'
-        }`}
-      >
-        <div className="flex items-center justify-between gap-3 text-[11px]">
-          <span className={`font-semibold tracking-wide uppercase ${outbound ? 'text-brand-700' : 'text-slate-600'}`}>
-            {outbound ? 'You' : 'Supplier'} · {KIND_LABELS[m.kind] ?? m.kind}
-          </span>
-          <span className="flex items-center gap-2 text-slate-400">
-            <span className={`font-medium ${cls}`}>
-              {label}
-              {m.simulated && m.delivery_status === 'SENT' ? ' (simulated)' : ''}
-              {m.attempts > 1 ? ` · ${m.attempts} attempts` : ''}
-            </span>
-            <span className="tabular">{formatDateTime(m.sent_at ?? m.created_at)}</span>
-          </span>
-        </div>
-        {m.subject && <p className="mt-2 text-sm font-medium text-slate-800">{m.subject}</p>}
-        <pre
-          className={`mt-1.5 font-sans text-[13px] leading-relaxed whitespace-pre-wrap text-slate-600 ${
-            long && !expanded ? 'max-h-48 overflow-hidden [mask-image:linear-gradient(to_bottom,black_70%,transparent)]' : ''
-          }`}
-        >
-          {m.body}
-        </pre>
-        {long && (
-          <button type="button" className="mt-1 text-xs font-medium text-brand-700 hover:underline" onClick={() => setExpanded((v) => !v)}>
-            {expanded ? 'Show less' : 'Show full message'}
-          </button>
-        )}
-        {m.error && m.delivery_status !== 'SENT' && <p className="mt-2 text-xs font-medium text-red-600">{m.error}</p>}
-      </div>
-    </li>
-  );
-}
-
 /**
  * Supplier list. With `selectable`, contactable suppliers get a checkbox bound to `selected` (a Set of ids).
- * Prices are shown in the quotation comparison, not repeated here.
+ * Prices live in the quotation comparison; details and emails open in the side panel via `onView`.
  */
-export default function SupplierTable({ suppliers, selectable = false, selected, onToggle }) {
-  const [open, setOpen] = useState(() => new Set());
-  const toggleOpen = (id) =>
-    setOpen((prev) => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
-    });
-
+export default function SupplierTable({ suppliers, selectable = false, selected, onToggle, onView, onSetEmail, onAllowEmail }) {
+  const [editingId, setEditingId] = useState(null);
   return (
     <ul className="divide-y divide-slate-100">
       {suppliers.map((s) => {
-        const canSelect = selectable && Boolean(s.email) && s.can_email !== false;
+        // Only suppliers that have not been contacted yet can be selected or given another email.
+        const notContacted = s.status === 'PENDING';
+        const canSelect = selectable && notContacted && Boolean(s.email) && s.can_email !== false;
+        const canEditEmail = Boolean(onSetEmail) && notContacted;
         const isSelected = canSelect && selected.has(s.id);
-        const isOpen = open.has(s.id);
         return (
           <li key={s.id} className={`px-5 py-4 transition-colors ${isSelected ? 'bg-brand-50/40' : ''}`}>
             <div className="flex gap-4">
-              {selectable && (
+              {selectable && notContacted && (
                 <input
                   type="checkbox"
                   className="mt-2.5 size-4 shrink-0 rounded accent-brand-600 disabled:opacity-40"
@@ -133,7 +126,9 @@ export default function SupplierTable({ suppliers, selectable = false, selected,
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                      <h3 className="font-semibold text-slate-900">{s.name}</h3>
+                      <button type="button" onClick={() => onView(s.id)} className="text-left font-semibold text-slate-900 hover:text-brand-700">
+                        {s.name}
+                      </button>
                       {s.rfq_ref && (
                         <span className="rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-500">{s.rfq_ref}</span>
                       )}
@@ -157,7 +152,16 @@ export default function SupplierTable({ suppliers, selectable = false, selected,
                     </span>
                   </p>
                 )}
-                {s.final_reason && <p className="mt-2 text-xs text-slate-500">{s.final_reason}</p>}
+                {s.final_reason && (
+                  <p className="mt-2 flex items-center gap-2 text-xs text-slate-500">
+                    {s.final_reason}
+                    {s.status === 'NEEDS_REVIEW' && (
+                      <button type="button" onClick={() => onView(s.id)} className="font-semibold text-brand-700 hover:underline">
+                        Re-check or enter the quote →
+                      </button>
+                    )}
+                  </p>
+                )}
                 {s.last_error && s.status === 'SEND_FAILED' && <p className="mt-2 text-xs font-medium text-red-600">{s.last_error}</p>}
 
                 <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs">
@@ -167,14 +171,43 @@ export default function SupplierTable({ suppliers, selectable = false, selected,
                       <a href={`mailto:${s.email}`} className="text-slate-700 hover:text-brand-700 hover:underline">
                         {s.email}
                       </a>
-                      {s.can_email === false && (
-                        <span className="rounded-full bg-amber-50 px-2 py-0.5 font-medium text-amber-800 ring-1 ring-amber-200 ring-inset">
-                          Not in email allowlist
+                      {s.email_overridden && (
+                        <span
+                          className="rounded-full bg-brand-50 px-2 py-0.5 font-medium text-brand-700 ring-1 ring-brand-200 ring-inset"
+                          title={`Original: ${s.original_email ?? 'none found'}`}
+                        >
+                          Your email · original: {s.original_email ?? 'none'}
                         </span>
+                      )}
+                      {s.can_email === false && (
+                        <>
+                          <span className="rounded-full bg-amber-50 px-2 py-0.5 font-medium text-amber-800 ring-1 ring-amber-200 ring-inset">
+                            Not in email allowlist
+                          </span>
+                          {onAllowEmail && notContacted && (
+                            <button
+                              type="button"
+                              onClick={() => onAllowEmail(s.email, s.id)}
+                              className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 font-semibold text-brand-700 ring-1 ring-brand-200 ring-inset hover:bg-brand-50"
+                            >
+                              <Icon name="check" className="size-3.5" /> Allow this address
+                            </button>
+                          )}
+                        </>
                       )}
                     </span>
                   ) : (
                     <span className="font-medium text-amber-700">No email found, so this supplier can't be contacted</span>
+                  )}
+                  {canEditEmail && editingId !== s.id && (
+                    <button
+                      type="button"
+                      onClick={() => setEditingId(s.id)}
+                      className="inline-flex items-center gap-1 rounded-md px-2 py-1 font-medium text-brand-700 hover:bg-brand-50"
+                    >
+                      <Icon name="mail" className="size-3.5" />
+                      {s.email ? 'Change email' : 'Add email'}
+                    </button>
                   )}
                   {s.website && (
                     <a href={s.website} target="_blank" rel="noreferrer" className="text-slate-500 hover:text-slate-800 hover:underline">
@@ -182,24 +215,17 @@ export default function SupplierTable({ suppliers, selectable = false, selected,
                     </a>
                   )}
                   {s.phone && <span className="text-slate-500">{s.phone}</span>}
-                  {s.messages?.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => toggleOpen(s.id)}
-                      className="ml-auto inline-flex items-center gap-1 rounded-md px-2 py-1 font-medium text-slate-700 hover:bg-slate-100"
-                    >
-                      {isOpen ? 'Hide conversation' : `Conversation (${s.messages.length})`}
-                      <Icon name="chevronDown" className={`size-3.5 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => onView(s.id)}
+                    className="ml-auto inline-flex items-center gap-1.5 rounded-md px-2 py-1 font-medium text-brand-700 hover:bg-brand-50"
+                  >
+                    <Icon name="eye" className="size-3.5" />
+                    {s.messages?.length ? `View details & emails (${s.messages.length})` : 'View details'}
+                  </button>
                 </div>
-
-                {isOpen && (
-                  <ol className="mt-4 space-y-3 rounded-xl bg-slate-50/80 p-4 ring-1 ring-slate-100 ring-inset">
-                    {s.messages.map((m) => (
-                      <Message key={m.id} m={m} />
-                    ))}
-                  </ol>
+                {canEditEmail && editingId === s.id && (
+                  <EmailEditor supplier={s} onSave={onSetEmail} onAllow={onAllowEmail} onDone={() => setEditingId(null)} />
                 )}
               </div>
             </div>

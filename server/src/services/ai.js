@@ -28,8 +28,12 @@ async function geminiGenerate(body) {
   if (!res.ok) {
     const detail = data.error?.message ? `: ${data.error.message}` : '';
     if (res.status === 429) throw new Error(`Gemini quota exceeded (HTTP 429)${detail}`);
-    if (res.status === 400 || res.status === 401 || res.status === 403) {
-      throw new Error(`Gemini rejected the request (HTTP ${res.status})${detail}; check GEMINI_API_KEY and GEMINI_MODEL`);
+    // Bad key, unknown/retired model or invalid request: retrying cannot help.
+    if ([400, 401, 403, 404].includes(res.status)) {
+      throw Object.assign(
+        new Error(`Gemini rejected the request (HTTP ${res.status})${detail}; check GEMINI_API_KEY and GEMINI_MODEL`),
+        { permanent: true },
+      );
     }
     throw new Error(`Gemini request failed (HTTP ${res.status})${detail}`);
   }
