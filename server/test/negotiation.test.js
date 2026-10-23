@@ -8,7 +8,7 @@ process.env.AI_MODE = 'mock';
 const { decideNextMove, concession, rankOffers, paymentScore, ANCHOR_FACTOR } = await import('../src/services/negotiation.js');
 const { parseReplyText } = await import('../src/services/replyParser.js');
 const { createPersona, respondToCounter, supplierReply } = await import('../src/services/simulation/supplierPersona.js');
-const { buildCounter, buildRfq } = await import('../src/services/proposals.js');
+const { buildAcceptance, buildCounter, buildRfq, signature } = await import('../src/services/proposals.js');
 
 const base = { target: 850, max: 950, maxRounds: 3, round: 0 };
 
@@ -168,5 +168,52 @@ describe('outbound emails never reveal the buyer limits', () => {
     assert.match(counter.body, /more competitive offers/);
     assert.match(counter.body, /final counter-offer/);
     assert.match(counter.body, /not a purchase order/);
+  });
+});
+
+describe('email signature and amounts', () => {
+  const smtp = { transport: 'smtp', from: 'Sourcing Desk <desk@gmail.test.com>', replyTo: '' };
+  const simulated = { transport: 'simulated', from: '', replyTo: '' };
+
+  test('real email signs with the mailbox replies reach, never a placeholder address', () => {
+    assert.equal(signature({ buyer_name: 'Procurement Team', buyer_email: 'procurement@example.com' }, smtp), 'Procurement Team\ndesk@gmail.test.com');
+    assert.equal(signature({ buyer_name: null, buyer_email: null }, smtp), 'Sourcing Desk\ndesk@gmail.test.com');
+    assert.equal(signature({ buyer_name: 'Asha', buyer_email: null }, { ...smtp, replyTo: 'buying@acme.in' }), 'Asha\nbuying@acme.in');
+  });
+
+  test('simulated email keeps a real buyer address and drops placeholders', () => {
+    assert.equal(signature({ buyer_name: 'Asha', buyer_email: 'asha@acme.in' }, simulated), 'Asha\nasha@acme.in');
+    assert.equal(signature({ buyer_name: 'Asha', buyer_email: 'procurement@example.com' }, simulated), 'Asha');
+  });
+
+  test('rupee totals use Indian grouping, as in the UI', () => {
+    const request = { commodity: 'Sunflower oil', quantity: 5000, unit: 'kg', currency: 'INR', location: 'Hyderabad', deadline: '2026-10-31' };
+    const { body } = buildAcceptance({ request, supplier: { name: 'Raja' }, rfqRef: 'RFQ-1', price: 137, approvedBy: 'Asha' });
+    assert.match(body, /₹6,85,000\.00/);
+    assert.doesNotMatch(body, /685,000/);
+  });
+});
+
+describe('request form validation', async () => {
+  const { CreateRequestSchema } = await import('../src/validation/request.js');
+  const base = { commodity: 'Cement', quantity: 200, unit: 'tonnes', target_price: 6500, currency: 'INR' };
+
+  test('a pasted bullet in front of the location is removed', () => {
+    assert.equal(CreateRequestSchema.parse({ ...base, location: '· Nellore, Andhra Pradesh, India' }).location, 'Nellore, Andhra Pradesh, India');
+    assert.equal(CreateRequestSchema.parse({ ...base, location: '  - Dubai, UAE ' }).location, 'Dubai, UAE');
+    assert.equal(CreateRequestSchema.safeParse({ ...base, location: ' · ' }).success, false);
+  });
+});
+
+describe('manual quote validation', async () => {
+  const { ManualQuoteSchema } = await import('../src/validation/request.js');
+
+  test('quote validity is optional, a whole number of days from 1 to 365', () => {
+    assert.equal(ManualQuoteSchema.parse({ unit_price: 6750 }).validity_days, undefined);
+    assert.equal(ManualQuoteSchema.parse({ unit_price: 6750, validity_days: '' }).validity_days, undefined, 'an empty field is not a value');
+    assert.equal(ManualQuoteSchema.parse({ unit_price: 6750, validity_days: '15' }).validity_days, 15);
+    for (const bad of [0, -1, 2.5, 400]) {
+      assert.equal(ManualQuoteSchema.safeParse({ unit_price: 6750, validity_days: bad }).success, false, `${bad} is rejected`);
+    }
   });
 });

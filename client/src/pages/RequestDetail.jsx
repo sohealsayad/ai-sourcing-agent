@@ -9,6 +9,7 @@ import StatusBadge from '../components/StatusBadge.jsx';
 import SupplierPanel from '../components/SupplierPanel.jsx';
 import SupplierTable from '../components/SupplierTable.jsx';
 import Timeline from '../components/Timeline.jsx';
+import { toast } from '../components/Toaster.jsx';
 import { CardHeader, EmptyState, ErrorState, Icon, Notice, PageHeader, Skeleton, Spinner } from '../components/ui.jsx';
 import WorkflowStepper from '../components/WorkflowStepper.jsx';
 import { formatDate, formatDateTime, formatMoney, formatNumber, hasPendingOutbound, IN_PROGRESS } from '../lib/format.js';
@@ -76,6 +77,7 @@ function AddSupplierForm({ requestId, realEmail, onAdded, onAllow }) {
       if (realEmail && allow) await api.allowRecipient(address, requestId);
       return { ...(await api.addSupplier(requestId, { name: name.trim(), email: address })), email: address };
     },
+    meta: { success: (res) => `Supplier added (${res.email}).` },
     onSuccess: (res) => {
       setName('');
       setEmail('');
@@ -95,7 +97,7 @@ function AddSupplierForm({ requestId, realEmail, onAdded, onAllow }) {
     >
       <div className="flex items-center gap-2">
         <span className="mr-1 text-sm font-medium text-slate-600">Add a supplier</span>
-        <input aria-label="Supplier name" className="field-input max-w-56" placeholder="Supplier name" value={name} onChange={(e) => setName(e.target.value)} />
+        <input id="add-supplier-name" aria-label="Supplier name" className="field-input max-w-56" placeholder="Supplier name" value={name} onChange={(e) => setName(e.target.value)} />
         <input
           aria-label="Supplier email"
           type="email"
@@ -137,6 +139,7 @@ export default function RequestDetail() {
   const [panelId, setPanelId] = useState(null);
   const closePanel = useCallback(() => setPanelId(null), []);
   const [showAllowlist, setShowAllowlist] = useState(false);
+  const [hideNoEmailHint, setHideNoEmailHint] = useState(false);
 
   const { data: r, isLoading, error, refetch } = useQuery({
     queryKey: ['request', id],
@@ -152,6 +155,7 @@ export default function RequestDetail() {
 
   const rediscover = useMutation({
     mutationFn: () => api.rediscover(id),
+    meta: { success: 'Searching for suppliers again…' },
     onSuccess: () => {
       setSelection(null);
       refresh();
@@ -160,6 +164,7 @@ export default function RequestDetail() {
 
   const sendProposals = useMutation({
     mutationFn: (ids) => api.sendProposals(id, ids),
+    meta: { success: (_res, ids) => (ids?.length ? `Sending proposals to ${ids.length} supplier${ids.length === 1 ? '' : 's'}…` : 'Sending proposals…') },
     onSuccess: () => setSelection(null),
     onSettled: refresh,
   });
@@ -169,6 +174,7 @@ export default function RequestDetail() {
     async (email, threadId) => {
       if (!window.confirm(`Real emails will be sent to ${email}.\n\nAllow sending to this address?`)) return false;
       await api.allowRecipient(email, id);
+      toast(`Real emails to ${email} are now allowed.`);
       if (threadId) setSelection((prev) => new Set([...(prev ?? []), threadId]));
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['request', id] }),
@@ -183,6 +189,7 @@ export default function RequestDetail() {
   const setSupplierEmail = useCallback(
     async (threadId, email) => {
       const res = await api.updateSupplierEmail(id, threadId, email);
+      toast(email ? `Email for this request set to ${email}.` : 'Supplier email reset to the original address.');
       // Pre-select a supplier that can now be emailed.
       if (res.can_email) setSelection((prev) => new Set([...(prev ?? []), threadId]));
       await queryClient.invalidateQueries({ queryKey: ['request', id] });
@@ -235,6 +242,14 @@ export default function RequestDetail() {
   const actionError = sendProposals.error ?? rediscover.error;
   const contacted = r.suppliers.filter((s) => s.selected);
   const quoted = r.suppliers.filter((s) => s.current_offer_price != null);
+  // Suppliers were found, but the web had no public email for any of them: explain what to do next.
+  const notContacted = r.suppliers.filter((s) => s.status === 'PENDING');
+  const noEmailFound = choosing && notContacted.length > 0 && notContacted.every((s) => !s.email);
+  const focusAddSupplier = () => {
+    const input = document.getElementById('add-supplier-name');
+    input?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    input?.focus({ preventScroll: true });
+  };
 
   return (
     <div className="space-y-6">
@@ -351,6 +366,37 @@ export default function RequestDetail() {
             </div>
           )}
           {showAllowlist && !r.simulation && <AllowlistPanel onClose={() => setShowAllowlist(false)} />}
+          {noEmailFound && !hideNoEmailHint && (
+            <div className="border-b border-amber-200 bg-amber-50 px-5 py-4" role="status">
+              <div className="flex items-start gap-3">
+                <Icon name="info" className="mt-0.5 size-5 shrink-0 text-amber-600" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-amber-900">
+                    None of the {notContacted.length === 1 ? 'supplier' : `${notContacted.length} suppliers`} found has a public email address
+                  </p>
+                  <p className="mt-0.5 text-sm text-amber-800">
+                    You can add an email manually (from their website or phone), add your own supplier, or search again to find more suppliers.
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button type="button" className="btn-secondary" onClick={focusAddSupplier}>
+                      <Icon name="plus" /> Add supplier manually
+                    </button>
+                    <button type="button" className="btn-secondary" onClick={() => rediscover.mutate()} disabled={busy}>
+                      {rediscover.isPending ? <Spinner /> : <Icon name="refresh" />} Search again
+                    </button>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="grid size-7 shrink-0 place-items-center rounded-md text-amber-700 hover:bg-amber-100"
+                  onClick={() => setHideNoEmailHint(true)}
+                  aria-label="Dismiss"
+                >
+                  <Icon name="x" className="size-4" />
+                </button>
+              </div>
+            </div>
+          )}
           {actionError && (
             <div className="flex items-center gap-2 border-b border-red-100 bg-red-50 px-5 py-2.5 text-sm text-red-700">
               <Icon name="alert" /> {actionError.message}

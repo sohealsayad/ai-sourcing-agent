@@ -1,8 +1,11 @@
 // Deterministic email templates. Prices and terms come from code, never from an LLM,
 // and the buyer's target and maximum prices are never written into any email.
 
+import { config } from '../config.js';
+
+// Indian grouping for rupees (₹6,85,000.00), as in the UI.
 const money = (value, currency) =>
-  new Intl.NumberFormat('en-US', { style: 'currency', currency, maximumFractionDigits: 2 }).format(value);
+  new Intl.NumberFormat(currency === 'INR' ? 'en-IN' : 'en-US', { style: 'currency', currency, maximumFractionDigits: 2 }).format(value);
 
 const qty = (value) => new Intl.NumberFormat('en-US').format(value);
 
@@ -26,8 +29,24 @@ export function replyByDate(request, now = new Date()) {
 export const makeRfqRef = (requestId, index) =>
   `RFQ-${requestId.replace(/-/g, '').slice(0, 8).toUpperCase()}-${String(index).padStart(2, '0')}`;
 
-function signature(request) {
-  return [request.buyer_name || 'Procurement Team', request.buyer_email].filter(Boolean).join('\n');
+// Reserved/placeholder domains that can never receive mail (RFC 2606 and common test domains).
+const PLACEHOLDER_EMAIL = /@(?:[\w-]+\.)*(?:example\.(?:com|org|net)|example|test|invalid|localhost)$/i;
+
+/** "Sourcing Desk <desk@gmail.com>" → { name: 'Sourcing Desk', email: 'desk@gmail.com' } */
+function parseAddress(value = '') {
+  const match = value.match(/^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$/);
+  return match ? { name: match[1].trim(), email: match[2].trim() } : { name: '', email: value.trim() };
+}
+
+/**
+ * Who signs the email. With real email the contact address is the mailbox replies actually reach
+ * (Reply-To, else From), so suppliers never see a placeholder such as procurement@example.com.
+ */
+export function signature(request, emailConfig = config.email) {
+  const buyerEmail = request.buyer_email && !PLACEHOLDER_EMAIL.test(request.buyer_email) ? request.buyer_email : null;
+  const name = request.buyer_name || parseAddress(emailConfig.from).name || 'Procurement Team';
+  const email = emailConfig.transport === 'smtp' ? parseAddress(emailConfig.replyTo || emailConfig.from).email || buyerEmail : buyerEmail;
+  return [name, email].filter(Boolean).join('\n');
 }
 
 export function buildRfq({ request, supplier, rfqRef, now = new Date() }) {

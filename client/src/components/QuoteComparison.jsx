@@ -64,6 +64,7 @@ export default function QuoteComparison({ request, onView }) {
                     <div className="min-w-0">
                       <p className="font-medium text-slate-900">{s.name}</p>
                       {highlight && !approved && <p className="text-xs font-medium text-brand-700">Recommended</p>}
+                      {s.offers?.at(-1)?.source === 'manual' && <p className="text-xs font-medium text-amber-700">Price entered manually</p>}
                     </div>
                   </div>
                 </td>

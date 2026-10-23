@@ -4,14 +4,33 @@ An automation workflow that takes a commodity request (commodity, location, quan
 
 **Stack:** React (Vite, Tailwind, TanStack Query, React Hook Form) · Node.js + Express · PostgreSQL · pg-boss (job queue on Postgres) · Gemini or Claude API (optional)
 
+## Demo
+
+The full interviewer walkthrough (talking points, feature tour, optional live segment, likely questions) is in **[docs/DEMO.md](docs/DEMO.md)**.
+
+Quick start in mock mode (no API keys, nothing is emailed): in `server/.env` set `AI_MODE=mock`, `EMAIL_TRANSPORT=simulated`, `SIMULATE_SUPPLIERS=true`, `INBOUND_PROVIDER=none`, then:
+
+```bash
+npm run install:all
+npm run dev            # http://localhost:5173 → New request
+```
+
+Three datasets that end in a recommended deal (buyer name `Procurement Team`, email blank):
+
+| # | Commodity | Specifications | Qty | Location | Currency | Target | Max | Rounds | Needed by |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 1121 Basmati Rice | Extra-long grain, aged 12 months, 25 kg bags, moisture ≤ 12% | 20 tonnes | Dubai, UAE | USD | 850 | 1000 | 3 | 2026-12-15 |
+| 2 | Refined Sunflower Oil | Food-grade, FSSAI compliant, sealed 15-litre containers | 5000 kg | Hyderabad, Telangana, India | INR | 140 | 165 | 3 | 2026-11-30 |
+| 3 | Portland Cement OPC 53 Grade | BIS IS 12269 certified, fresh production, 50 kg bags | 200 tonnes | Nellore, Andhra Pradesh, India | INR | 6500 | 7800 | 2 | 2026-11-30 |
+
 ## Workflow
 
 | Step | What happens |
 |---|---|
 | 1. Request | Form → `POST /api/requests` → request saved, workflow starts |
-| 2. Find suppliers | Gemini (Google Search grounding) or Claude + web search (or mock mode) → validated, de-duplicated, ranked suppliers |
+| 2. Find suppliers | Tavily web search + Gemini (or Claude with web search, or mock mode) → validated, de-duplicated, ranked suppliers |
 | 3. Send proposals | User picks suppliers → one RFQ email each, through an outbox with retry-safe delivery |
-| 4. Supplier replies | Replies arrive via `POST /api/webhooks/email` or the built-in supplier simulator |
+| 4. Supplier replies | Replies arrive via the IMAP inbox poller, `POST /api/webhooks/email`, or the built-in supplier simulator |
 | 5. Read quotes | Price, delivery, payment terms, validity extracted (rules, or the AI in live mode) |
 | 6. Negotiate | Rule-based counter-offers, capped by max rounds and the buyer's maximum price |
 | 7. Recommend & approve | Final offers scored → recommendation → **human approves** → acceptance + regret emails |
@@ -39,7 +58,7 @@ plus `NO_DEAL` (no offer within the maximum), `CANCELLED` (all offers rejected) 
 ### Design decisions
 
 - **Outbox for every email.** RFQs, counter-offers, acceptances and regrets are first written to `messages` as `PENDING`, each with a unique idempotency key (`rfq:<thread>`, `counter:<thread>:<round>`, `acceptance:<request>`). A `deliver-message` job locks the row and sends only if it is still `PENDING`. Double clicks, retries and duplicate jobs therefore never send twice. The key is also passed to the transport, so a real provider can dedupe the rare crash-after-send case.
-- **Simulated transport only.** `server/src/services/mailer.js` records emails but never sends them, and the server refuses to start with any other `EMAIL_TRANSPORT`. A real provider (SMTP, Resend) would plug in at that same interface.
+- **Simulated by default, real email opt-in.** `server/src/services/mailer.js` records emails without sending unless `EMAIL_TRANSPORT=smtp`. Real email only goes to allow-listed recipients (see *Real email testing*).
 - **One place decides the request status.** `syncRequestStatus()` (`server/src/workflow/progress.js`) runs at the end of every transaction that changes a supplier thread, under a row lock on the request. It moves the request forward from the thread states, so concurrent per-supplier jobs cannot race each other.
 - **Code decides prices, never the LLM.** `decideNextMove()` (`server/src/services/negotiation.js`) is a pure function:
   - The first counter anchors at 97% of target. Later counters concede up to 60% of the remaining gap by the last round.
@@ -66,7 +85,7 @@ npm run dev                          # API :4000 (applies migrations on start) +
 ### Tests
 
 ```bash
-npm test --prefix server   # 61 tests: unit + integration against a separate <db>_test database
+npm test --prefix server   # unit + integration tests against a separate <db>_test database (never real email or search)
 ```
 
 Integration tests use a real Postgres test database (created automatically) and an in-memory job queue, so they can run every step, retry or duplicate deterministically.
@@ -78,19 +97,56 @@ Integration tests use a real Postgres test database (created automatically) and 
 | `DATABASE_URL` | — | Postgres connection string |
 | `AI_MODE` | `live` if the provider's key is set, else `mock` | `mock` needs no API key |
 | `AI_PROVIDER` | `gemini` if `GEMINI_API_KEY` is set, else `anthropic` | Which AI runs live mode |
-| `GEMINI_API_KEY` | — | Gemini key from [Google AI Studio](https://aistudio.google.com/apikey); enables live supplier search (Google Search grounding) and AI reply parsing |
+| `GEMINI_API_KEY` | — | Gemini key from [Google AI Studio](https://aistudio.google.com/apikey); enables live supplier search and AI reply parsing |
 | `GEMINI_MODEL` | `gemini-3.5-flash` | Gemini model for live mode |
 | `SEARCH_PROVIDER` | `tavily` if `TAVILY_API_KEY` is set, else `none` | How Gemini finds suppliers online: `tavily` (free web search, Gemini reads the results), `gemini` (Google Search grounding, needs billing) or `none` (AI knowledge only, marked "not web-verified") |
 | `TAVILY_API_KEY` | — | Free key from [Tavily](https://app.tavily.com) for live supplier search |
 | `ANTHROPIC_API_KEY` | — | Alternative: Claude for live mode (`AI_PROVIDER=anthropic`) |
 | `ANTHROPIC_MODEL` | `claude-sonnet-5-5` | Claude model for live mode |
 | `MAX_SUPPLIERS` / `MAX_WEB_SEARCHES` | `5` / `6` | Discovery limits |
-| `EMAIL_TRANSPORT` | `simulated` | Only `simulated` is implemented |
+| `EMAIL_TRANSPORT` | `simulated` | `simulated` (nothing sent) or `smtp` (real email, allow-listed recipients only) |
 | `SIMULATE_SUPPLIERS` | `true` | Simulated suppliers reply to proposals and counters |
 | `SIM_REPLY_DELAY_SECONDS` | `3-8` | Simulated reply delay (range or fixed number) |
 | `REPLY_TIMEOUT_SECONDS` | `45` | How long to wait for a reply each round |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` | — | SMTP server and login for real email (Gmail: your address and an App Password) |
+| `EMAIL_FROM` / `EMAIL_REPLY_TO` | — | Sender, and the mailbox supplier replies go to (also used in email signatures) |
+| `EMAIL_ALLOWED_RECIPIENTS` | — | Addresses (or `@domain`) that may receive real email; more can be approved in the UI |
+| `INBOUND_PROVIDER` | `none` | `imap` reads supplier replies from the Reply-To inbox; `none` uses the webhook / simulator only |
+| `INBOUND_POLL_SECONDS` | `15` | How often the IMAP inbox is checked |
 | `INBOUND_WEBHOOK_SECRET` | — | If set, required as `X-Webhook-Secret` on the inbound webhook |
 | `RUN_WORKER` | `true` | `false` runs the API without the job worker |
+
+## Using the app
+
+| Page | What it shows |
+|---|---|
+| **Requests** | All requests with KPI cards, status tabs, search and sort |
+| **Request details** | Workflow stepper, approval panel, quote comparison, suppliers, activity. **View details** on a supplier opens a side panel with the latest quote, offer history, negotiation status, recovery tools and the email conversation |
+| **Suppliers** | Every supplier across requests, with how often each was contacted, quoted and won |
+| **Quotes** | Every price received, compared with the target; buyer-entered prices are marked **Manual** |
+| **Negotiations** | Open supplier conversations (waiting, countered, final, closed) |
+| **Approvals** | Requests waiting for a decision, and recently approved deals |
+| **Settings** | Read-only AI, search and email configuration (from `server/.env`), plus the email allowlist |
+
+Every action shows a toast with its result; form fields still show their own errors.
+
+**Recovery tools** (supplier side panel, real email):
+- **Re-check replies:** re-reads the newest priced reply of a supplier that needs review.
+- **Enter quote manually:** types in a price the parser missed. It is treated like a reply, but stored and shown as **Manual entry · not confirmed by the supplier**, in the panel, Quotes page, comparison and approval panel.
+- **Mark as no response:** closes a supplier that will never reply, so the request can be recommended.
+- **Apply latest quote:** if a supplier sends a **lower** price after their offer was marked final (and nothing is approved yet), it becomes their offer and the recommendation is re-ranked. No email is sent. New replies are applied automatically; the button is for replies that arrived earlier.
+
+Prices a supplier wrote that never became an offer (for example, sent while the supplier was under review) are listed in the offer history as *not used in negotiation*.
+
+**Gmail limitation.** The app only tracks emails it sends itself and replies that arrive in the inbox. Emails you send from Gmail directly (for example a manual "We accept") are not recorded, so the request keeps waiting. Make buyer decisions (approve, reject) in the app.
+
+**Email signature.** With real email, RFQs and acceptances are signed with the buyer name and the mailbox replies actually reach (`EMAIL_REPLY_TO`, else `EMAIL_FROM`), so suppliers never see a placeholder such as `procurement@example.com`. Rupee amounts use Indian grouping (₹6,85,000.00), as in the UI.
+
+**Search credits (Tavily).** One discovery runs up to 8 basic Tavily searches (1 credit each): 3 supplier searches plus up to 5 "<name> contact email" lookups for suppliers found without an email. Results are saved on the request (`discovery_cache`), so an automatic retry after an AI failure reuses them instead of searching again. **Retry search / Rediscover** clears them and searches fresh. Tests never call Tavily.
+
+**When Gemini is overloaded.** Google answers HTTP 503 ("high demand") or 500/502/504 when a model is busy. Each Gemini call retries these itself (after 2 s and 6 s, or the server's `Retry-After`). If the model is still busy, the request fails with a message saying it is a Google-side capacity issue, not your key or model, and you can use **Retry search** later. A Gemini failure never silently swaps in unverified suppliers; only a search outage falls back to AI knowledge, clearly marked "not web-verified". Quota errors (429) and a wrong key or model (400/401/403/404) are reported as such.
+
+**Mock mode.** `AI_MODE=mock` (or no AI key) still generates demo suppliers on reserved `example.com` addresses, and `SIMULATE_SUPPLIERS=true` lets simulated suppliers reply. Nothing in mock mode can reach a real inbox.
 
 ## Real email testing (optional)
 
@@ -126,11 +182,17 @@ Most temp-mail inboxes **cannot send**, so a "supplier" on Temp Mail can read ou
 | `GET` | `/api/requests` | List requests |
 | `GET` | `/api/requests/:id` | Request with suppliers, messages, offers, recommendation, timeline |
 | `POST` | `/api/requests/:id/rediscover` | Re-run supplier discovery |
-| `POST` | `/api/requests/:id/suppliers` | `{ name, email, website? }`: add a supplier by hand (before sending) |
+| `POST` | `/api/requests/:id/suppliers` | `{ name, email, website? }`: add a supplier by hand (also while collecting quotes) |
+| `PATCH` | `/api/requests/:id/suppliers/:threadId` | `{ email }`: email to use for this supplier on this request |
+| `POST` | `/api/requests/:id/suppliers/:threadId/recheck` | Re-read replies (needs review), or apply a newer lower quote after a final offer |
+| `POST` | `/api/requests/:id/suppliers/:threadId/quote` | `{ unit_price, delivery_days?, payment_terms? }`: enter a quote manually |
+| `POST` | `/api/requests/:id/suppliers/:threadId/close` | Mark a waiting supplier as no response |
 | `POST` | `/api/requests/:id/send-proposals` | `{ requestSupplierIds? }`: send RFQs (or retry a failed send) |
 | `POST` | `/api/requests/:id/approve` | `{ requestSupplierId, approvedBy }`: approve one final offer |
 | `POST` | `/api/requests/:id/reject` | `{ rejectedBy, reason? }`: reject all offers |
 | `POST` | `/api/webhooks/email` | `{ from, subject, text, messageId? }`: inbound supplier email |
+| `GET` / `POST` / `DELETE` | `/api/email-allowlist` | Addresses approved for real email from the UI |
+| `GET` | `/api/suppliers` · `/api/quotes` · `/api/negotiations` | Cross-request views for the Suppliers, Quotes and Negotiations pages (quotes include `source: supplier \| manual`) |
 | `GET` | `/api/health` | Health check, shows AI mode and email transport |
 
 Try a "real" supplier reply by hand (simulation off, using the RFQ ref shown in the UI):
@@ -146,11 +208,14 @@ curl -X POST localhost:4000/api/webhooks/email -H "Content-Type: application/jso
 server/src/
   index.js / app.js            boot (migrations, queue, worker) / Express app
   db/                          pool, migration runner, SQL migrations (idempotent)
-  routes/                      requests (incl. send, approve, reject), webhooks
+  routes/                      requests (incl. send, approve, reject, recovery), webhooks, email allowlist, insights
   services/
-    discovery.js, ai.js        supplier search (Gemini or Claude with web search, or mock)
+    discovery.js, ai.js        supplier search (Tavily + Gemini, Claude with web search, or mock)
+    webSearch.js               Tavily client
+    emailAllowlist.js          recipients approved from the UI
+    inbound/                   IMAP client and reply-text helpers
     proposals.js               RFQ, counter, acceptance and regret templates
-    mailer.js                  simulated email transport
+    mailer.js                  simulated or SMTP transport, recipient allowlist
     inbound.js                 matches replies to suppliers by RFQ reference
     replyParser.js             quote extraction (rules; Gemini or Claude in live mode)
     negotiation.js             counter-offer rules and offer scoring (pure)
@@ -163,6 +228,7 @@ server/src/
     queue.js, worker.js        pg-boss setup, job handlers, recovery
     jobs/                      discover, deliver, simulate reply, process reply, reply timeout
 client/src/
-  pages/                       NewRequest, RequestList, RequestDetail
-  components/                  SupplierTable, QuoteComparison, ApprovalPanel, WorkflowStepper, Timeline, StatusBadge
+  pages/                       RequestList, NewRequest, RequestDetail, Suppliers, Quotes, Negotiations, Approvals, Settings
+  components/                  Sidebar, Topbar, SupplierTable, SupplierPanel, Conversation, QuoteComparison, ApprovalPanel,
+                               AllowlistPanel, Timeline, Toaster, StatusBadge, WorkflowStepper
 ```

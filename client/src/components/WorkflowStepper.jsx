@@ -11,6 +11,8 @@ const STEPS = [
 
 const stepIndexOf = (status) => STEPS.findIndex((s) => s.statuses.includes(status));
 const STOPPED = new Set(['FAILED', 'NO_DEAL', 'CANCELLED']);
+// Nothing is running in these states: the workflow waits for the buyer (choose suppliers, approve a deal).
+const WAITING_FOR_BUYER = new Set(['SUPPLIERS_FOUND', 'DEAL_RECOMMENDED']);
 
 export default function WorkflowStepper({ status, events = [] }) {
   const stopped = STOPPED.has(status);
@@ -49,7 +51,7 @@ export default function WorkflowStepper({ status, events = [] }) {
             </span>
             <span className={`mt-2.5 text-sm font-medium ${active || complete ? 'text-slate-900' : 'text-slate-400'}`}>{step.label}</span>
             <span className={`text-xs ${active ? (stopped ? 'text-red-600' : 'text-brand-700') : 'text-slate-400'}`}>
-              {active ? (stopped ? 'Stopped' : 'In progress') : step.hint}
+              {active ? (stopped ? 'Stopped' : WAITING_FOR_BUYER.has(status) ? 'Your action' : 'In progress') : step.hint}
             </span>
           </li>
         );

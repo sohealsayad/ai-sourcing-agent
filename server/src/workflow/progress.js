@@ -1,3 +1,4 @@
+import { OFFER_SOURCE_SQL } from '../db/offerSource.js';
 import { rankOffers, round2, WEIGHTS } from '../services/negotiation.js';
 import { logEvent, lockRequest, RequestStatus, TERMINAL_THREAD_STATUSES, ThreadStatus, transition } from './stateMachine.js';
 
@@ -56,11 +57,12 @@ export async function syncRequestStatus(client, requestId) {
 async function loadThreads(client, requestId) {
   const { rows } = await client.query(
     `SELECT rs.id, rs.status, rs.rounds_used, rs.opening_price, rs.current_offer_price, s.name,
-            lo.delivery_days, lo.payment_terms
+            lo.delivery_days, lo.payment_terms, lo.source
        FROM request_suppliers rs
        JOIN suppliers s ON s.id = rs.supplier_id
        LEFT JOIN LATERAL (
-         SELECT delivery_days, payment_terms FROM offers o
+         SELECT o.delivery_days, o.payment_terms, ${OFFER_SOURCE_SQL} AS source FROM offers o
+           LEFT JOIN messages m ON m.id = o.message_id
           WHERE o.request_supplier_id = rs.id
           ORDER BY o.round DESC, o.created_at DESC LIMIT 1
        ) lo ON true
@@ -93,6 +95,7 @@ async function finalize(client, request, threads) {
         deliveryDays: t.delivery_days,
         paymentTerms: t.payment_terms,
         rounds: t.rounds_used,
+        source: t.source,
       })),
     { max: request.max_price },
   ).map((o) => ({

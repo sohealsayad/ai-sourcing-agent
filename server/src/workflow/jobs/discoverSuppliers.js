@@ -40,7 +40,9 @@ export async function discoverSuppliers(job) {
   if (!request || request.status !== RequestStatus.DISCOVERING) return;
 
   await logEvent(pool, requestId, 'DISCOVERY_STARTED', { attempt: (job.retryCount ?? 0) + 1 });
-  const { suppliers, searchQueries, mode, usage, searchError } = await findSuppliers(request);
+  const { suppliers, searchQueries, mode, usage, searchError } = await findSuppliers(request, {
+    saveSearchCache: (cache) => query('UPDATE sourcing_requests SET discovery_cache = $2 WHERE id = $1', [requestId, cache]),
+  });
 
   await withTransaction(async (client) => {
     for (const s of suppliers) {

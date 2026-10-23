@@ -29,8 +29,16 @@ export default function ApprovalPanel({ request }) {
   const [name, setName] = useState(request.buyer_name ?? '');
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['request', request.id] });
 
-  const approve = useMutation({ mutationFn: () => api.approveDeal(request.id, choice, name.trim()), onSettled: refresh });
-  const reject = useMutation({ mutationFn: () => api.rejectDeals(request.id, name.trim()), onSettled: refresh });
+  const approve = useMutation({
+    mutationFn: () => api.approveDeal(request.id, choice, name.trim()),
+    onSettled: refresh,
+    meta: { success: 'Deal approved. The acceptance email is being sent.' },
+  });
+  const reject = useMutation({
+    mutationFn: () => api.rejectDeals(request.id, name.trim()),
+    onSettled: refresh,
+    meta: { success: 'All offers rejected. No supplier was committed to.' },
+  });
   const { currency, unit } = request;
 
   if (request.status === 'CLOSED') {
@@ -123,6 +131,11 @@ export default function ApprovalPanel({ request }) {
             Recommended: {best.name} at {formatMoney(best.price, currency)} per {unit}
           </h2>
           <p className="mt-1 max-w-3xl text-sm text-slate-600">{request.recommendation.reason}</p>
+          {best.source === 'manual' && (
+            <p className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800 ring-1 ring-amber-200 ring-inset">
+              <Icon name="info" className="size-3.5" /> This price was entered manually by you; the supplier has not confirmed it by email.
+            </p>
+          )}
         </div>
         <span className="tabular shrink-0 rounded-lg bg-white px-3 py-2 text-center shadow-card ring-1 ring-slate-200">
           <span className="block text-[11px] font-medium text-slate-500">Score</span>

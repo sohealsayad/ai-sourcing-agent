@@ -287,6 +287,97 @@ describe('finishing a real-email negotiation', () => {
     assert.equal(r.recommendation.ranked[0].price, 820);
     assert.equal((await api.post(`/requests/${request.id}/suppliers/${alpha.id}/recheck`, {})).status, 409, 'nothing lower left to apply');
   });
+
+  test('a manual quote is the buyer’s entry in the conversation, a webhook reply is the supplier’s; both negotiate alike', async () => {
+    const counterFor = async (enterQuote) => {
+      const { request } = await seedRequest({ suppliers: [{ name: 'Alpha Foods', email: 'sales@alpha.example.com', score: 90 }] });
+      await api.post(`/requests/${request.id}/send-proposals`, {});
+      await drain();
+      const alpha = threadOf(await getRequest(request.id), 'Alpha Foods');
+      await enterQuote(request, alpha);
+      await drain();
+      return threadOf(await getRequest(request.id), 'Alpha Foods');
+    };
+
+    const manual = await counterFor((request, alpha) =>
+      api.post(`/requests/${request.id}/suppliers/${alpha.id}/quote`, { unit_price: 900, delivery_days: 10, payment_terms: 'Net 30' }),
+    );
+    const supplier = await counterFor((_request, alpha) =>
+      api.post('/webhooks/email', { from: 'sales@alpha.example.com', subject: `Re: ${alpha.rfq_ref}`, text: 'Price: USD 900 per tonne\nDelivery: within 10 days' }),
+    );
+
+    const manualMsg = manual.messages.find((m) => m.direction === 'inbound');
+    assert.equal(manualMsg.source, 'buyer_manual');
+    assert.match(manualMsg.body, /USD 900 per tonnes/, 'uses the request unit, not "per unit"');
+    assert.match(manualMsg.body, /not sent to or confirmed by the supplier/);
+    assert.equal(manual.offers[0].source, 'manual');
+
+    const supplierMsg = supplier.messages.find((m) => m.direction === 'inbound');
+    assert.equal(supplierMsg.source, 'supplier');
+    assert.equal(supplier.offers[0].source, 'supplier');
+
+    for (const t of [manual, supplier]) {
+      assert.ok(t.messages.filter((m) => m.direction === 'outbound').every((m) => m.source === 'buyer'));
+      assert.equal(t.status, 'COUNTERED', '900 is above the 850 target');
+    }
+    const counterPrice = (t) => t.messages.find((m) => m.kind === 'COUNTER').parsed_json.counter_price;
+    assert.equal(counterPrice(manual), counterPrice(supplier), 'the same counter-offer, whoever entered the price');
+  });
+
+  test('a manual quote keeps its validity when given, and never invents one', async () => {
+    const enter = async (quote) => {
+      const { request } = await seedRequest({ suppliers: [{ name: 'Alpha Foods', email: 'sales@alpha.example.com', score: 90 }] });
+      await api.post(`/requests/${request.id}/send-proposals`, {});
+      await drain();
+      const alpha = threadOf(await getRequest(request.id), 'Alpha Foods');
+      const res = await api.post(`/requests/${request.id}/suppliers/${alpha.id}/quote`, quote);
+      await drain();
+      return { res, thread: threadOf(await getRequest(request.id), 'Alpha Foods'), request, alpha };
+    };
+
+    const { rows: [{ expected }] } = await query(`SELECT (current_date + 15)::text AS expected`);
+    const withValidity = await enter({ unit_price: 840, delivery_days: 10, payment_terms: 'Net 30', validity_days: 15 });
+    assert.equal(withValidity.res.status, 202);
+    const offer = withValidity.thread.offers[0];
+    assert.deepEqual([offer.unit_price, offer.delivery_days, offer.payment_terms, offer.valid_until, offer.source], [840, 10, 'Net 30', expected, 'manual']);
+    const msg = withValidity.thread.messages.find((m) => m.source === 'buyer_manual');
+    assert.match(msg.body, /Valid for: 15 days/);
+    assert.equal(msg.parsed_json.validity_days, 15);
+
+    const without = await enter({ unit_price: 840, delivery_days: 10 });
+    assert.equal(without.thread.offers[0].valid_until, null, 'no validity given → none stored');
+    assert.doesNotMatch(without.thread.messages.find((m) => m.source === 'buyer_manual').body, /Valid for/);
+
+    const bad = await api.post(`/requests/${without.request.id}/suppliers/${without.alpha.id}/quote`, { unit_price: 800, validity_days: 0 });
+    assert.equal(bad.status, 400);
+    assert.match(bad.body.fields.validity_days, /at least 1 day/);
+  });
+
+  test('offers say whether the supplier quoted them or the buyer typed them in', async () => {
+    const { request } = await seedRequest({ suppliers: [{ name: 'Alpha Foods', email: 'sales@alpha.example.com', score: 90 }] });
+    await api.post(`/requests/${request.id}/send-proposals`, {});
+    await drain();
+    const alpha = threadOf(await getRequest(request.id), 'Alpha Foods');
+    // A priced reply that never became an offer (e.g. it arrived while the supplier was parked for review).
+    await query(
+      `INSERT INTO messages (request_supplier_id, direction, kind, subject, body, delivery_status, processed_at, parsed_json)
+       VALUES ($1, 'inbound', 'REPLY', 'Re: quote', 'Price: USD 990 per tonne', 'RECEIVED', now(), '{"unit_price": 990, "parser": "rules"}')`,
+      [alpha.id],
+    );
+    await api.post(`/requests/${request.id}/suppliers/${alpha.id}/quote`, { unit_price: 840 });
+    await drain();
+    await api.post('/webhooks/email', { from: 'sales@alpha.example.com', subject: `Re: ${alpha.rfq_ref}`, text: 'Price: USD 830 per tonne' });
+    await drain();
+
+    const r = await getRequest(request.id);
+    const a = threadOf(r, 'Alpha Foods');
+    assert.deepEqual(a.offers.map((o) => [o.unit_price, o.source]), [[840, 'manual'], [830, 'supplier']]);
+    assert.deepEqual(a.unused_quotes.map((q) => q.unit_price), [990], 'the ignored written quote is still listed');
+    assert.equal(r.recommendation.ranked[0].source, 'supplier');
+
+    const quotes = (await api.get('/quotes')).body;
+    assert.deepEqual(quotes.map((q) => [q.unit_price, q.source]).sort(), [[830, 'supplier'], [840, 'manual']]);
+  });
 });
 
 describe('approving recipients from the UI', () => {

@@ -11,6 +11,7 @@ export default function AllowlistPanel({ onClose, className = 'border-b border-s
   const { data, isLoading, error } = useQuery({ queryKey: ['allowlist'], queryFn: api.listAllowedRecipients });
   const remove = useMutation({
     mutationFn: api.removeAllowedRecipient,
+    meta: { success: (_res, email) => `${email} removed. Real emails to it are blocked again.` },
     onSettled: () =>
       Promise.all(['allowlist', 'request', 'health'].map((key) => queryClient.invalidateQueries({ queryKey: [key] }))),
   });

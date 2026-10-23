@@ -105,7 +105,17 @@ export default function QuotesPage() {
                     <td className="td truncate text-slate-600" title={q.payment_terms ?? ''}>
                       {q.payment_terms ?? '—'}
                     </td>
-                    <td className="td text-slate-600">{q.round === 0 ? 'Opening' : `Counter ${q.round}`}</td>
+                    <td className="td text-slate-600">
+                      {q.source === 'manual' ? (
+                        <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-800 ring-1 ring-amber-200 ring-inset" title="Entered manually by the buyer">
+                          Manual
+                        </span>
+                      ) : q.round === 0 ? (
+                        'Opening'
+                      ) : (
+                        `Counter ${q.round}`
+                      )}
+                    </td>
                     <td className="td">
                       <StatusBadge status={q.thread_status} kind="thread" />
                     </td>

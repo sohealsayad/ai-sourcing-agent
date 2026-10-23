@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, Route, Routes } from 'react-router-dom';
 import Sidebar from './components/Sidebar.jsx';
+import Toaster from './components/Toaster.jsx';
 import Topbar from './components/Topbar.jsx';
 import { EmptyState } from './components/ui.jsx';
 import NewRequest from './pages/NewRequest.jsx';
@@ -57,6 +58,7 @@ export default function App() {
   return (
     <div className="min-h-screen">
       <Sidebar collapsed={collapsed} onToggle={toggle} />
+      <Toaster />
 
       <div className={`transition-[padding] duration-200 ${collapsed ? 'pl-[72px]' : 'pl-64'}`}>
         <Topbar collapsed={collapsed} onToggle={toggle} />

@@ -7,7 +7,11 @@ export const CreateRequestSchema = z
   .object({
     commodity: z.string().trim().min(2, 'Commodity is required').max(200),
     specifications: optional(z.string().trim().max(2000)),
-    location: z.string().trim().min(2, 'Location is required').max(200),
+    // Pasted text often starts with a bullet ("· Nellore, …"); it would end up in search queries and emails.
+    location: z
+      .string()
+      .transform((v) => v.replace(/^[\s\p{P}\p{S}]+/u, '').trim())
+      .pipe(z.string().min(2, 'Location is required').max(200)),
     quantity: z.coerce.number().positive('Quantity must be greater than 0'),
     unit: z.string().trim().min(1, 'Unit is required').max(30),
     target_price: z.coerce.number().positive('Target price must be greater than 0'),
@@ -59,6 +63,14 @@ export const ManualQuoteSchema = z.object({
   unit_price: z.coerce.number().positive('Enter a price greater than 0'),
   delivery_days: optional(z.coerce.number().int().positive('Delivery days must be a whole number')),
   payment_terms: optional(z.string().trim().max(200)),
+  // How long the quote holds, if the supplier said so. Never defaulted.
+  validity_days: optional(
+    z.coerce
+      .number()
+      .int('Validity must be a whole number of days')
+      .min(1, 'Validity must be at least 1 day')
+      .max(365, 'Validity can be at most 365 days'),
+  ),
 });
 
 export const SendProposalsSchema = z.object({

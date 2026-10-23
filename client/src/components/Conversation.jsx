@@ -31,7 +31,8 @@ function preview(m) {
   const line = m.body
     .split('\n')
     .map((l) => l.trim())
-    .find((l) => l && !/^(dear|hi|hello)\b/i.test(l));
+    // Skip greetings and heading lines such as "Quote entered manually by the buyer:".
+    .find((l) => l && !/^(dear|hi|hello)\b/i.test(l) && !l.endsWith(':'));
   return line ?? m.body.trim();
 }
 
@@ -58,18 +59,25 @@ export default function Conversation({ messages, supplierName }) {
       <span className="absolute top-4 bottom-4 left-[15px] w-px bg-slate-200" aria-hidden="true" />
       {messages.map((m) => {
         const outbound = m.direction === 'outbound';
+        // A quote the buyer typed in is stored like a reply, but it is the buyer's entry, not the supplier's email.
+        const manual = m.source === 'buyer_manual' || (!m.source && m.parsed_json?.manual === true);
+        const byBuyer = outbound || manual;
         const latest = m.id === latestId;
         const isOpen = open.has(m.id);
-        const [label, chip] = DELIVERY[m.delivery_status] ?? [m.delivery_status, 'bg-slate-100 text-slate-600'];
+        const [label, chip] = manual
+          ? ['Not sent · recorded by you', 'bg-amber-50 text-amber-800']
+          : (DELIVERY[m.delivery_status] ?? [m.delivery_status, 'bg-slate-100 text-slate-600']);
+        const kindLabel = manual ? 'Manual quote' : (KIND_LABELS[m.kind] ?? m.kind);
+        const kindColor = manual ? 'text-amber-700' : outbound ? 'text-brand-700' : 'text-emerald-700';
         return (
           <li key={m.id} className="relative flex gap-3">
             <span
               className={`relative z-10 grid size-8 shrink-0 place-items-center rounded-full text-[10px] font-bold ring-4 ring-white ${
-                outbound ? 'bg-brand-600 text-white' : 'bg-emerald-100 text-emerald-800'
+                manual ? 'bg-amber-100 text-amber-800' : outbound ? 'bg-brand-600 text-white' : 'bg-emerald-100 text-emerald-800'
               }`}
               aria-hidden="true"
             >
-              {outbound ? 'YOU' : initials(supplierName)}
+              {byBuyer ? 'YOU' : initials(supplierName)}
             </span>
 
             <div
@@ -85,9 +93,12 @@ export default function Conversation({ messages, supplierName }) {
               >
                 <span className="min-w-0 flex-1">
                   <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
-                    <span className="font-semibold text-slate-900">{outbound ? 'You' : 'Supplier'}</span>
+                    <span className="font-semibold text-slate-900">{byBuyer ? 'You' : 'Supplier'}</span>
                     <span className="text-slate-400">·</span>
-                    <span className={outbound ? 'font-medium text-brand-700' : 'font-medium text-emerald-700'}>{KIND_LABELS[m.kind] ?? m.kind}</span>
+                    <span className={`font-medium ${kindColor}`}>{kindLabel}</span>
+                    {outbound && m.kind === 'COUNTER' && (
+                      <span className="rounded-full bg-slate-100 px-1.5 py-px text-[10px] font-medium text-slate-600">Proposed · awaiting supplier</span>
+                    )}
                     {latest && <span className="rounded-full bg-emerald-50 px-1.5 py-px text-[10px] font-semibold text-emerald-700 uppercase">Latest</span>}
                   </span>
                   <span className="mt-0.5 block truncate text-[13px] text-slate-600">{preview(m)}</span>

@@ -61,6 +61,9 @@ function negotiationHint(request, supplier) {
     case 'COUNTERED':
       return ['info', `Counter-offer sent${lastCounter?.parsed_json?.counter_price ? ` at ${money(lastCounter.parsed_json.counter_price)}` : ''}. Waiting for their reply. The agent counters automatically within your limits.`];
     case 'FINAL_OFFER':
+      if (supplier.offers?.at(-1)?.source === 'manual') {
+        return ['warn', 'This price was entered manually by you; the supplier has not confirmed it in an email. Check with them before approving.'];
+      }
       return price <= request.target_price
         ? ['success', 'Offer meets your target price. You can approve it once the recommendation is ready.']
         : ['success', 'Negotiation finished within your maximum. This offer can be approved.'];
@@ -94,16 +97,25 @@ const HINT_TONES = {
 function RecoveryTools({ request, supplier }) {
   const queryClient = useQueryClient();
   const [showQuote, setShowQuote] = useState(false);
-  const [quote, setQuote] = useState({ unit_price: '', delivery_days: '', payment_terms: '' });
+  const [quote, setQuote] = useState({ unit_price: '', delivery_days: '', payment_terms: '', validity_days: '' });
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['request', request.id] });
 
-  const recheck = useMutation({ mutationFn: () => api.recheckSupplier(request.id, supplier.id), onSuccess: refresh });
-  const close = useMutation({ mutationFn: () => api.closeSupplier(request.id, supplier.id), onSuccess: refresh });
+  const recheck = useMutation({
+    mutationFn: () => api.recheckSupplier(request.id, supplier.id),
+    onSuccess: refresh,
+    meta: { success: `Re-reading ${supplier.name}'s replies…` },
+  });
+  const close = useMutation({
+    mutationFn: () => api.closeSupplier(request.id, supplier.id),
+    onSuccess: refresh,
+    meta: { success: `${supplier.name} marked as no response.` },
+  });
   const enter = useMutation({
     mutationFn: () => api.enterQuote(request.id, supplier.id, quote),
+    meta: { success: 'Quote saved. The agent will respond within your limits.' },
     onSuccess: () => {
       setShowQuote(false);
-      setQuote({ unit_price: '', delivery_days: '', payment_terms: '' });
+      setQuote({ unit_price: '', delivery_days: '', payment_terms: '', validity_days: '' });
       refresh();
     },
   });
@@ -161,7 +173,7 @@ function RecoveryTools({ request, supplier }) {
 
       {showQuote && (
         <form
-          className="mt-3 grid grid-cols-3 gap-3 rounded-lg bg-slate-50 p-3 ring-1 ring-slate-200 ring-inset"
+          className="mt-3 grid grid-cols-1 gap-3 rounded-lg bg-slate-50 p-3 ring-1 ring-slate-200 ring-inset sm:grid-cols-2"
           onSubmit={(e) => {
             e.preventDefault();
             enter.mutate();
@@ -185,8 +197,27 @@ function RecoveryTools({ request, supplier }) {
             </label>
             <input id="mq-terms" className="field-input" placeholder="e.g. Net 30" value={quote.payment_terms} onChange={set('payment_terms')} />
           </div>
-          <div className="col-span-3 flex items-center justify-between gap-3">
-            <p className="text-xs text-slate-500">Treated like the supplier&apos;s reply: the agent counters or accepts within your limits.</p>
+          <div>
+            <label className="field-label text-xs" htmlFor="mq-validity">
+              Quote validity (days) <span className="font-normal text-slate-400">optional</span>
+            </label>
+            <input
+              id="mq-validity"
+              type="number"
+              min="1"
+              max="365"
+              step="1"
+              className="field-input tabular"
+              placeholder="e.g. 15"
+              value={quote.validity_days}
+              onChange={set('validity_days')}
+            />
+          </div>
+          <div className="col-span-full flex flex-wrap items-center justify-between gap-3">
+            <p className="min-w-0 flex-1 basis-64 text-xs text-slate-500">
+              This records a quote you entered yourself; it is not the supplier&apos;s confirmed reply. The agent may then counter or accept
+              automatically within your limits.
+            </p>
             <button className="btn-primary px-3 py-1.5" disabled={busy || !quote.unit_price}>
               {enter.isPending ? <Spinner /> : <Icon name="check" />} Save quote
             </button>
@@ -215,6 +246,7 @@ export default function SupplierPanel({ request, supplier, onClose }) {
 
   const approve = useMutation({
     mutationFn: (name) => api.approveDeal(request.id, supplier.id, name),
+    meta: { success: 'Deal approved. The acceptance email is being sent.' },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['request', request.id] }),
   });
 
@@ -224,7 +256,12 @@ export default function SupplierPanel({ request, supplier, onClose }) {
   const money = (v) => formatMoney(v, currency);
   const latest = supplier.offers?.at(-1);
   const price = supplier.current_offer_price;
-  const saved = price != null && supplier.opening_price > price ? ((supplier.opening_price - price) / supplier.opening_price) * 100 : 0;
+  const openingFromSupplier = supplier.offers?.[0]?.source === 'supplier';
+  const saved = openingFromSupplier && price != null && supplier.opening_price > price ? ((supplier.opening_price - price) / supplier.opening_price) * 100 : 0;
+  const manual = latest?.source === 'manual';
+  // The pending lower quote has its own "Apply latest quote" box.
+  const unused = (supplier.unused_quotes ?? []).filter((q) => q.message_id !== supplier.lower_quote?.message_id);
+  const offerLabel = (o, i) => (o.source === 'manual' ? 'Entered manually by you' : i === 0 ? 'Opening quote' : o.round === 0 ? 'Revised quote' : `After counter ${o.round}`);
   const eligible = request.status === 'DEAL_RECOMMENDED' && (request.recommendation?.ranked ?? []).some((o) => o.requestSupplierId === supplier.id);
   const recommended = eligible && supplier.id === request.recommended_request_supplier_id;
   const [tone, hint] = negotiationHint(request, supplier);
@@ -275,12 +312,17 @@ export default function SupplierPanel({ request, supplier, onClose }) {
           {latest ? (
             <section className="rounded-xl border-2 border-emerald-300 bg-white p-4 shadow-card">
               <div className="flex items-center justify-between">
-                <p className="text-sm font-semibold text-slate-900">
-                  Latest quote <span className="font-normal text-slate-400">({latest.round === 0 ? 'opening quote' : `after counter ${latest.round}`})</span>
+                <p className="flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-900">
+                  Latest quote <span className="font-normal text-slate-400">({offerLabel(latest, supplier.offers.length - 1).toLowerCase()})</span>
+                  {manual && (
+                    <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800 ring-1 ring-amber-200 ring-inset">
+                      Manual entry · not confirmed by the supplier
+                    </span>
+                  )}
                 </p>
-                {supplier.offers.length > 1 && (
+                {(supplier.offers.length > 1 || unused.length > 0) && (
                   <button type="button" className="text-xs font-semibold text-brand-700 hover:underline" onClick={() => setShowHistory((v) => !v)}>
-                    {showHistory ? 'Hide history' : `View all quotes (${supplier.offers.length})`}
+                    {showHistory ? 'Hide history' : `View all quotes (${supplier.offers.length + unused.length})`}
                   </button>
                 )}
               </div>
@@ -299,7 +341,7 @@ export default function SupplierPanel({ request, supplier, onClose }) {
                   </p>
                   <p className="text-slate-500">
                     Quote validity
-                    <span className="block text-sm font-semibold text-slate-900">{latest.valid_until ? `until ${formatDate(latest.valid_until)}` : '—'}</span>
+                    <span className="block text-sm font-semibold text-slate-900">{latest.valid_until ? `until ${formatDate(latest.valid_until)}` : 'Not specified'}</span>
                   </p>
                 </div>
                 <div className="text-xs text-slate-500">
@@ -309,15 +351,30 @@ export default function SupplierPanel({ request, supplier, onClose }) {
               </div>
               {showHistory && (
                 <ol className="mt-3 space-y-1.5 border-t border-slate-100 pt-3">
-                  {supplier.offers.map((o) => (
+                  {supplier.offers.map((o, i) => (
                     <li key={o.id} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-1.5 text-xs">
-                      <span className="text-slate-500">{o.round === 0 ? 'Opening quote' : `After counter ${o.round}`}</span>
+                      <span className={o.source === 'manual' ? 'font-medium text-amber-800' : 'text-slate-500'}>
+                        {offerLabel(o, i)} · {formatDate(o.created_at)}
+                      </span>
                       <span className="tabular font-semibold text-slate-900">
                         {money(o.unit_price)}
                         {o.delivery_days ? <span className="ml-2 font-normal text-slate-500">{o.delivery_days} days</span> : null}
+                        {o.valid_until ? <span className="ml-2 font-normal text-slate-500">valid until {formatDate(o.valid_until)}</span> : null}
                       </span>
                     </li>
                   ))}
+                  {unused.length > 0 && (
+                    <>
+                      <li className="pt-2 text-[11px] font-semibold tracking-wide text-slate-500 uppercase">Prices in their emails not used in negotiation</li>
+                      {unused.map((q) => (
+                        <li key={q.message_id} className="flex items-center justify-between rounded-lg border border-dashed border-slate-200 px-3 py-1.5 text-xs">
+                          <span className="text-slate-500">Supplier email · {formatDate(q.received_at)}</span>
+                          <span className="tabular font-medium text-slate-600">{money(q.unit_price)}</span>
+                        </li>
+                      ))}
+                      <li className="text-[11px] text-slate-400">These replies arrived while the supplier was under review or already closed, so the agent did not act on them.</li>
+                    </>
+                  )}
                 </ol>
               )}
             </section>
@@ -371,6 +428,15 @@ export default function SupplierPanel({ request, supplier, onClose }) {
 
           {/* Conversation */}
           <Section title={<>Conversation <span className="font-normal text-slate-400">({supplier.messages?.length ?? 0})</span></>}>
+            {!request.simulation && (
+              <p className="mb-3 flex items-start gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
+                <Icon name="mail" className="mt-px size-4 shrink-0 text-slate-400" />
+                <span>
+                  Only emails sent by this app and replies arriving in the inbox appear here. Emails you send yourself from Gmail are not tracked, so make
+                  buyer decisions (approve, reject) in the app.
+                </span>
+              </p>
+            )}
             <Conversation key={supplier.id} messages={supplier.messages} supplierName={supplier.name} />
           </Section>
         </div>

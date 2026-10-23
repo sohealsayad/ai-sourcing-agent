@@ -1,6 +1,6 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { forwardRef } from 'react';
+import { forwardRef, useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
@@ -8,25 +8,44 @@ import { Icon, PageHeader, Spinner } from '../components/ui.jsx';
 import { formatMoney } from '../lib/format.js';
 import { CURRENCIES, requestSchema, UNITS } from '../lib/schema.js';
 
-function Field({ label, error, hint, children, className = '' }) {
+function Field({ name, label, error, hint, required = false, children, className = '' }) {
   return (
     <div className={className}>
-      <label className="field-label">{label}</label>
+      <label className="field-label" htmlFor={name}>
+        {label}
+        {required && (
+          <span className="ml-1 text-red-600" aria-hidden="true">
+            *
+          </span>
+        )}
+      </label>
       {children}
-      {error ? <p className="field-error">{error.message}</p> : hint && <p className="field-hint">{hint}</p>}
+      {error ? (
+        <p id={`${name}-error`} className="field-error" role="alert">
+          {error.message}
+        </p>
+      ) : (
+        hint && (
+          <p id={`${name}-hint`} className="field-hint">
+            {hint}
+          </p>
+        )
+      )}
     </div>
   );
 }
 
 function Section({ step, title, description, children }) {
   return (
-    <section className="grid grid-cols-[15rem_1fr] gap-8 border-b border-slate-100 px-6 py-6 last:border-0">
-      <div>
-        <span className="grid size-6 place-items-center rounded-full bg-brand-50 text-xs font-semibold text-brand-700 ring-1 ring-brand-100">{step}</span>
-        <h2 className="mt-3 text-sm font-semibold text-slate-900">{title}</h2>
-        <p className="mt-1 text-sm leading-relaxed text-slate-500">{description}</p>
+    <section className="border-b border-slate-100 px-6 py-6 last:border-0">
+      <div className="flex items-start gap-3">
+        <span className="grid size-6 shrink-0 place-items-center rounded-full bg-brand-50 text-xs font-semibold text-brand-700 ring-1 ring-brand-100">{step}</span>
+        <div>
+          <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
+          <p className="mt-1 text-sm leading-relaxed text-slate-500">{description}</p>
+        </div>
       </div>
-      <div className="grid grid-cols-2 gap-x-5 gap-y-5">{children}</div>
+      <div className="mt-5 grid grid-cols-2 gap-x-5 gap-y-5">{children}</div>
     </section>
   );
 }
@@ -56,14 +75,18 @@ export default function NewRequest() {
     handleSubmit,
     setError,
     watch,
-    formState: { errors },
+    trigger,
+    formState: { errors, touchedFields },
   } = useForm({
     resolver: zodResolver(requestSchema),
     defaultValues: { unit: 'tonnes', currency: 'USD', max_rounds: 3 },
+    mode: 'onTouched',
+    reValidateMode: 'onChange',
   });
 
   const mutation = useMutation({
     mutationFn: api.createRequest,
+    meta: { success: 'Request created. Searching for suppliers…' },
     onSuccess: (request) => {
       queryClient.invalidateQueries({ queryKey: ['requests'] });
       navigate(`/requests/${request.id}`);
@@ -83,7 +106,16 @@ export default function NewRequest() {
     'max_rounds',
   ]);
   const qty = Number(quantity) || 0;
-  const inputProps = (name) => ({ ...register(name), 'aria-invalid': errors[name] ? 'true' : undefined });
+  const inputProps = (name, hasHint = false) => ({
+    ...register(name),
+    id: name,
+    'aria-invalid': errors[name] ? 'true' : undefined,
+    'aria-describedby': errors[name] ? `${name}-error` : hasHint ? `${name}-hint` : undefined,
+  });
+
+  useEffect(() => {
+    if (touchedFields.max_price) trigger('max_price');
+  }, [target, touchedFields.max_price, trigger]);
 
   return (
     <div className="space-y-6">
@@ -100,17 +132,26 @@ export default function NewRequest() {
       <div className="grid grid-cols-[1fr_20rem] items-start gap-6">
         <form onSubmit={handleSubmit((data) => mutation.mutate(data))} noValidate className="card overflow-hidden">
           <Section step={1} title="What do you need?" description="Be specific; better details mean better supplier matches.">
-            <Field label="Commodity" error={errors.commodity} className="col-span-2">
-              <input className="field-input" placeholder="e.g. 1121 Basmati rice" {...inputProps('commodity')} />
+            <Field name="commodity" label="Commodity" error={errors.commodity} required className="col-span-2">
+              <input className="field-input" placeholder="e.g. 1121 Basmati rice" required minLength={2} maxLength={200} {...inputProps('commodity')} />
             </Field>
-            <Field label="Specifications" error={errors.specifications} hint="Optional: grade, packaging, certifications, etc." className="col-span-2">
-              <textarea rows={3} className="field-input resize-y" placeholder="e.g. Extra-long grain, 25 kg bags, ISO 22000 certified" {...inputProps('specifications')} />
+            <Field name="specifications" label="Specifications" error={errors.specifications} hint="Optional: grade, packaging, certifications, etc." className="col-span-2">
+              <textarea rows={3} className="field-input resize-y" placeholder="e.g. Extra-long grain, 25 kg bags, ISO 22000 certified" maxLength={2000} {...inputProps('specifications', true)} />
             </Field>
-            <Field label="Quantity" error={errors.quantity}>
-              <input type="number" min="0" step="any" className="field-input tabular" placeholder="20" {...inputProps('quantity')} />
+            <Field name="quantity" label="Quantity" error={errors.quantity} required>
+              <input
+                type="number"
+                min="0"
+                step="any"
+                inputMode="decimal"
+                className="field-input tabular"
+                placeholder="20"
+                required
+                {...inputProps('quantity')}
+              />
             </Field>
-            <Field label="Unit" error={errors.unit}>
-              <select className="field-input" {...inputProps('unit')}>
+            <Field name="unit" label="Unit" error={errors.unit} required>
+              <select className="field-input" required {...inputProps('unit')}>
                 {UNITS.map((u) => (
                   <option key={u}>{u}</option>
                 ))}
@@ -119,24 +160,24 @@ export default function NewRequest() {
           </Section>
 
           <Section step={2} title="Where & when" description="Suppliers near the delivery location are ranked higher.">
-            <Field label="Delivery location" error={errors.location}>
-              <input className="field-input" placeholder="e.g. Dubai, UAE" {...inputProps('location')} />
+            <Field name="location" label="Delivery location" error={errors.location} required>
+              <input className="field-input" placeholder="e.g. Dubai, UAE" required minLength={2} maxLength={200} {...inputProps('location')} />
             </Field>
-            <Field label="Needed by" error={errors.deadline} hint="Optional">
-              <input type="date" className="field-input" {...inputProps('deadline')} />
+            <Field name="deadline" label="Needed by" error={errors.deadline} hint="Optional">
+              <input type="date" className="field-input" {...inputProps('deadline', true)} />
             </Field>
           </Section>
 
           <Section step={3} title="Price & negotiation" description="Your target price is never shown to suppliers; it guides the negotiation.">
-            <Field label="Currency" error={errors.currency}>
-              <select className="field-input" {...inputProps('currency')}>
+            <Field name="currency" label="Currency" error={errors.currency} required>
+              <select className="field-input" required {...inputProps('currency')}>
                 {CURRENCIES.map((c) => (
                   <option key={c}>{c}</option>
                 ))}
               </select>
             </Field>
-            <Field label="Negotiation rounds" error={errors.max_rounds} hint="Most counter-offers per supplier (1–5).">
-              <select className="field-input" {...inputProps('max_rounds')}>
+            <Field name="max_rounds" label="Negotiation rounds" error={errors.max_rounds} hint="Most counter-offers per supplier (1–5)." required>
+              <select className="field-input" required {...inputProps('max_rounds', true)}>
                 {[1, 2, 3, 4, 5].map((n) => (
                   <option key={n} value={n}>
                     {n}
@@ -144,20 +185,26 @@ export default function NewRequest() {
                 ))}
               </select>
             </Field>
-            <Field label={`Target price per ${unit || 'unit'}`} error={errors.target_price} hint="The price you want to pay.">
-              <PriceInput currency={currency} placeholder="850" {...inputProps('target_price')} />
+            <Field name="target_price" label={`Target price per ${unit || 'unit'}`} error={errors.target_price} hint="The price you want to pay." required>
+              <PriceInput currency={currency} placeholder="850" required inputMode="decimal" {...inputProps('target_price', true)} />
             </Field>
-            <Field label="Maximum price" error={errors.max_price} hint="Optional: walk away above this.">
-              <PriceInput currency={currency} placeholder="950" {...inputProps('max_price')} />
+            <Field name="max_price" label="Maximum price" error={errors.max_price} hint="Optional: walk away above this.">
+              <PriceInput
+                currency={currency}
+                placeholder="950"
+                min={Number(target) > 0 ? Number(target) : 0}
+                inputMode="decimal"
+                {...inputProps('max_price', true)}
+              />
             </Field>
           </Section>
 
           <Section step={4} title="Your details" description="Used to sign the proposals sent to suppliers.">
-            <Field label="Name" error={errors.buyer_name} hint="Optional">
-              <input className="field-input" placeholder="Procurement team" {...inputProps('buyer_name')} />
+            <Field name="buyer_name" label="Name" error={errors.buyer_name} hint="Optional">
+              <input className="field-input" placeholder="Procurement team" maxLength={120} {...inputProps('buyer_name', true)} />
             </Field>
-            <Field label="Email" error={errors.buyer_email} hint="Optional">
-              <input type="email" className="field-input" placeholder="you@company.com" {...inputProps('buyer_email')} />
+            <Field name="buyer_email" label="Email" error={errors.buyer_email} hint="Optional">
+              <input type="email" autoComplete="email" className="field-input" placeholder="you@company.com" {...inputProps('buyer_email', true)} />
             </Field>
           </Section>
 

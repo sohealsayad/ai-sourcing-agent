@@ -76,7 +76,7 @@ export function normalizeSuppliers(raw, limit = config.maxSuppliers) {
  * - Gemini + SEARCH_PROVIDER=tavily: Tavily searches, Gemini picks suppliers from the results
  * - Gemini + no search (or search unavailable): suppliers from Gemini's knowledge, marked unverified
  */
-export async function findSuppliers(request) {
+export async function findSuppliers(request, { saveSearchCache } = {}) {
   if (config.ai.mode === 'mock') {
     return { suppliers: normalizeSuppliers(mockSuppliers(request)), searchQueries: [], mode: 'mock' };
   }
@@ -84,9 +84,11 @@ export async function findSuppliers(request) {
   if (config.ai.provider === 'gemini' && config.search.provider !== 'gemini') {
     if (config.search.provider === 'tavily') {
       try {
-        return await findWithTavily(request);
+        return await findWithTavily(request, saveSearchCache);
       } catch (err) {
-        if (err.permanent) throw err; // e.g. a bad key: fail clearly instead of guessing
+        // Only a search outage falls back to AI knowledge (clearly marked unverified). A bad key, or
+        // Gemini itself failing after the search, fails the job so it is retried with the cached results.
+        if (err.permanent || !err.searchFailed) throw err;
         return { ...(await findFromKnowledge(request)), searchError: err.message };
       }
     }
@@ -119,11 +121,26 @@ export function buildSearchQueries(request) {
 const formatResults = (results) =>
   results.map((r, i) => `[${i + 1}] ${r.title}\nURL: ${r.url}\n${r.content.replace(/\s+/g, ' ').slice(0, 700)}`).join('\n\n');
 
-async function findWithTavily(request) {
+/**
+ * Tavily search that remembers results per query on the request (`discovery_cache`), so a job
+ * retry after a Gemini failure reuses them instead of spending search credits again.
+ */
+function cachedSearch(request, saveSearchCache) {
+  const cache = { ...(request.discovery_cache?.searches ?? {}) };
+  return async (query, options) => {
+    if (cache[query]) return cache[query];
+    cache[query] = await searchWeb(query, options);
+    await saveSearchCache?.({ searches: cache });
+    return cache[query];
+  };
+}
+
+async function findWithTavily(request, saveSearchCache) {
+  const search = cachedSearch(request, saveSearchCache);
   const searchQueries = buildSearchQueries(request);
   const byUrl = new Map();
   for (const query of searchQueries) {
-    for (const r of await searchWeb(query)) if (r.url && !byUrl.has(r.url)) byUrl.set(r.url, r);
+    for (const r of await search(query)) if (r.url && !byUrl.has(r.url)) byUrl.set(r.url, r);
   }
   const results = [...byUrl.values()].slice(0, MAX_RESULTS_FOR_MODEL);
   if (!results.length) return { suppliers: [], searchQueries, mode: 'live' };
@@ -133,7 +150,7 @@ async function findWithTavily(request) {
     maxTokens: 4000,
   });
   const suppliers = normalizeSuppliers(raw);
-  const lookups = await addEmailsFromSearch(suppliers, request);
+  const lookups = await addEmailsFromSearch(suppliers, request, search);
   return { suppliers, searchQueries: [...searchQueries, ...lookups], mode: 'live' };
 }
 
@@ -141,7 +158,7 @@ async function findWithTavily(request) {
  * Snippets rarely contain emails, so for suppliers without one run a small "<name> contact email"
  * search and accept only an address on the supplier's own domain (never a guess).
  */
-async function addEmailsFromSearch(suppliers, request) {
+async function addEmailsFromSearch(suppliers, request, search) {
   const queries = [];
   for (const s of suppliers.filter((x) => !x.email && x.website).slice(0, MAX_EMAIL_LOOKUPS)) {
     const domain = hostOf(s.website);
@@ -149,7 +166,7 @@ async function addEmailsFromSearch(suppliers, request) {
     const query = `"${s.name}" ${request.location.split(',')[0]} contact email`;
     queries.push(query);
     try {
-      const results = await searchWeb(query, { maxResults: 5 });
+      const results = await search(query, { maxResults: 5 });
       const found = results
         .flatMap((r) => `${r.content} ${r.title}`.match(EMAIL_RE) ?? [])
         .map((e) => e.toLowerCase())

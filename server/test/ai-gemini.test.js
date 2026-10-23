@@ -14,7 +14,7 @@ process.env.SEARCH_PROVIDER = 'gemini';
 process.env.TAVILY_API_KEY = 'tvly-test-key';
 
 const { buildConfig, config } = await import('../src/config.js');
-const { completeJson, completeWithWebSearch, setAiFetch } = await import('../src/services/ai.js');
+const { completeJson, completeWithWebSearch, setAiFetch, setAiSleep } = await import('../src/services/ai.js');
 const { buildSearchQueries, findSuppliers } = await import('../src/services/discovery.js');
 const { parseReply } = await import('../src/services/replyParser.js');
 const { setSearchFetch } = await import('../src/services/webSearch.js');
@@ -37,6 +37,8 @@ const textResponse = (text, extra = {}) => ({
     usageMetadata: { promptTokenCount: 120, candidatesTokenCount: 80 },
   },
 });
+
+setAiSleep(async () => {}); // in-call retries wait without real delays in tests
 
 afterEach(() => {
   setAiFetch();
@@ -277,5 +279,63 @@ describe('job retries', () => {
 
     await assert.rejects(run(new Error('temporary outage')), /temporary outage/);
     assert.equal(finals.length, 1, 'a temporary error is rethrown for pg-boss to retry');
+  });
+});
+
+const OVERLOADED = {
+  status: 503,
+  json: { error: { code: 503, status: 'UNAVAILABLE', message: 'This model is currently experiencing high demand. Please try again later.' } },
+};
+
+describe('Gemini outages', () => {
+  test('a temporary 503 is retried inside the call', async () => {
+    let n = 0;
+    const calls = fakeGemini(() => (n++ === 0 ? OVERLOADED : textResponse('{"ok": true}')));
+    assert.deepEqual(await completeJson({ prompt: 'x', maxTokens: 10 }), { ok: true });
+    assert.equal(calls.length, 2);
+  });
+
+  test('a lasting 503 says it is a Google-side capacity issue, not the key or model', async () => {
+    const calls = fakeGemini(() => OVERLOADED);
+    await assert.rejects(completeJson({ prompt: 'x', maxTokens: 10 }), (err) => {
+      assert.match(err.message, /Gemini is temporarily unavailable \(HTTP 503 UNAVAILABLE\)/);
+      assert.match(err.message, /not your API key or model \(gemini-test-model\)/);
+      assert.equal(err.permanent, undefined, 'the job may still retry later');
+      return true;
+    });
+    assert.equal(calls.length, 3);
+  });
+
+  test('a network failure is retried; a 404 (wrong model) is not', async () => {
+    let n = 0;
+    setAiFetch(async () => {
+      if (n++ === 0) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } });
+      return { ok: true, status: 200, json: async () => textResponse('{"ok": 1}').json };
+    });
+    assert.deepEqual(await completeJson({ prompt: 'x', maxTokens: 10 }), { ok: 1 });
+    assert.equal(n, 2);
+
+    const calls = fakeGemini(() => ({ status: 404, json: { error: { message: 'models/x is not found' } } }));
+    await assert.rejects(completeJson({ prompt: 'x', maxTokens: 10 }), (err) => err.permanent === true);
+    assert.equal(calls.length, 1);
+  });
+
+  test('when Gemini fails after the search, discovery fails (no silent fallback) and a retry reuses the search', async () => {
+    config.search.provider = 'tavily';
+    const tavily = fakeTavily(() => SEARCH_RESULTS);
+    let saved = null;
+    const saveSearchCache = async (cache) => {
+      saved = cache;
+    };
+    fakeGemini(() => OVERLOADED);
+    await assert.rejects(findSuppliers(REQUEST, { saveSearchCache }), /temporarily unavailable/);
+    assert.equal(tavily.length, 3, 'three discovery searches');
+    assert.equal(Object.keys(saved.searches).length, 3);
+
+    // The job retry reads the request again, now with the cached results.
+    fakeGemini(() => textResponse(JSON.stringify({ suppliers: [{ name: 'Natraj Oil Mills', website: 'https://www.natrajoil.com', email: 'sales@natrajoil.com', relevance_score: 90 }] })));
+    const result = await findSuppliers({ ...REQUEST, discovery_cache: saved }, { saveSearchCache });
+    assert.equal(result.mode, 'live');
+    assert.equal(tavily.length, 3, 'no new Tavily searches (credits) on the retry');
   });
 });

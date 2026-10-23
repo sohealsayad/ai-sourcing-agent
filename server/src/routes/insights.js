@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { OFFER_SOURCE_SQL } from '../db/offerSource.js';
 import { query } from '../db/pool.js';
 
 // Read-only cross-request views for the Suppliers, Quotes and Negotiations pages.
@@ -32,7 +33,7 @@ insightsRouter.get(
   '/quotes',
   asyncRoute(async (req, res) => {
     const { rows } = await query(
-      `SELECT o.id, o.round, o.unit_price, o.delivery_days, o.payment_terms, o.created_at,
+      `SELECT o.id, o.round, o.unit_price, o.delivery_days, o.payment_terms, o.created_at, ${OFFER_SOURCE_SQL} AS source,
               COALESCE(o.currency, r.currency) AS currency,
               rs.id AS thread_id, rs.status AS thread_status, s.name AS supplier,
               r.id AS request_id, r.commodity, r.unit, r.quantity, r.target_price, r.max_price
@@ -40,6 +41,7 @@ insightsRouter.get(
          JOIN request_suppliers rs ON rs.id = o.request_supplier_id
          JOIN suppliers s ON s.id = rs.supplier_id
          JOIN sourcing_requests r ON r.id = rs.request_id
+         LEFT JOIN messages m ON m.id = o.message_id
         ORDER BY o.created_at DESC
         LIMIT 500`,
     );

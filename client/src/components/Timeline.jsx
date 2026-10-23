@@ -44,8 +44,8 @@ function describe(event, currency) {
       return { title: `Reply from ${p.supplier}`, detail: p.simulated ? 'Simulated supplier' : null };
     case 'QUOTE_RECEIVED':
       return {
-        title: `${p.supplier} quoted ${money(p.price)}`,
-        detail: [p.round === 0 ? 'Opening quote' : `After counter ${p.round}`, p.deliveryDays && `${p.deliveryDays} days delivery`]
+        title: p.parser === 'manual' ? `Manual quote recorded for ${p.supplier}: ${money(p.price)}` : `${p.supplier} quoted ${money(p.price)}`,
+        detail: [p.parser === 'manual' ? 'Entered by you, not by the supplier' : p.round === 0 ? 'Opening quote' : `After counter ${p.round}`, p.deliveryDays && `${p.deliveryDays} days delivery`]
           .filter(Boolean)
           .join(' · '),
       };

@@ -17,16 +17,55 @@ export function setAiFetch(fn) {
   aiFetch = fn ?? ((...args) => fetch(...args));
 }
 
+let aiSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/** Test hook: replace the wait between in-call retries (pass nothing to restore). */
+export function setAiSleep(fn) {
+  aiSleep = fn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+}
+
+// Google returns 500/502/503/504 when a model is overloaded ("high demand"); these usually clear
+// within seconds, so retry inside the call. Retrying the whole job would also repeat the web search.
+const TRANSIENT_STATUSES = [500, 502, 503, 504];
+const RETRY_DELAYS_MS = [2000, 6000];
+const MAX_RETRY_AFTER_MS = 15000;
+
+function retryDelay(res, attempt) {
+  const seconds = Number(res?.headers?.get?.('retry-after'));
+  return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds * 1000, MAX_RETRY_AFTER_MS) : RETRY_DELAYS_MS[attempt];
+}
+
 async function geminiGenerate(body) {
   const { apiKey, model } = config.ai.gemini;
-  const res = await aiFetch(`${GEMINI_URL}/${encodeURIComponent(model)}:generateContent`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json().catch(() => ({}));
+  let res;
+  let data;
+  for (let attempt = 0; ; attempt++) {
+    const last = attempt >= RETRY_DELAYS_MS.length;
+    try {
+      res = await aiFetch(`${GEMINI_URL}/${encodeURIComponent(model)}:generateContent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      // Network-level failure (DNS, reset connection): no HTTP response at all.
+      if (last) throw new Error(`Could not reach Gemini (${err.cause?.code ?? err.message}); check the internet connection and use Retry search`);
+      await aiSleep(RETRY_DELAYS_MS[attempt]);
+      continue;
+    }
+    data = await res.json().catch(() => ({}));
+    if (!TRANSIENT_STATUSES.includes(res.status) || last) break;
+    await aiSleep(retryDelay(res, attempt));
+  }
+
   if (!res.ok) {
     const detail = data.error?.message ? `: ${data.error.message}` : '';
+    if (TRANSIENT_STATUSES.includes(res.status)) {
+      const status = data.error?.status ? ` ${data.error.status}` : '';
+      throw new Error(
+        `Gemini is temporarily unavailable (HTTP ${res.status}${status})${detail} This is a Google-side capacity issue, ` +
+          `not your API key or model (${model}); use Retry search in a few minutes.`,
+      );
+    }
     if (res.status === 429) throw new Error(`Gemini quota exceeded (HTTP 429)${detail}`);
     // Bad key, unknown/retired model or invalid request: retrying cannot help.
     if ([400, 401, 403, 404].includes(res.status)) {

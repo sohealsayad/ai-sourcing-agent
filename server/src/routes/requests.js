@@ -15,6 +15,7 @@ import { upsertSupplier } from '../workflow/jobs/discoverSuppliers.js';
 import { approveDeal, rejectDeals } from '../workflow/approval.js';
 import { enqueue, enqueueDeliveries, JOBS } from '../workflow/queue.js';
 import { LATE_INVITE_STATUSES, queueProposals } from '../workflow/sendProposals.js';
+import { OFFER_SOURCE_SQL } from '../db/offerSource.js';
 import { closeWaitingThread } from '../workflow/jobs/replyTimeout.js';
 import { lockRequest, logEvent, RequestStatus, ThreadStatus, transition } from '../workflow/stateMachine.js';
 
@@ -115,8 +116,9 @@ requestsRouter.get(
         [id],
       ),
       query(
-        `SELECT o.* FROM offers o
+        `SELECT o.*, ${OFFER_SOURCE_SQL} AS source FROM offers o
            JOIN request_suppliers rs ON rs.id = o.request_supplier_id
+           LEFT JOIN messages m ON m.id = o.message_id
           WHERE rs.request_id = $1
           ORDER BY o.round, o.created_at`,
         [id],
@@ -126,7 +128,12 @@ requestsRouter.get(
 
     if (!request.rows[0]) throw new NotFoundError('Request not found');
     const byThread = (rows) => (threadId) => rows.filter((r) => r.request_supplier_id === threadId);
-    const messagesOf = byThread(messages.rows);
+    // Who a message is from: a quote typed in by the buyer is stored like a reply, but is not the supplier's.
+    const withSource = (m) => ({
+      ...m,
+      source: m.direction === 'outbound' ? 'buyer' : m.parsed_json?.manual ? 'buyer_manual' : 'supplier',
+    });
+    const messagesOf = byThread(messages.rows.map(withSource));
     const offersOf = byThread(offers.rows);
     const usedMessageIds = new Set(offers.rows.map((o) => o.message_id));
     // A lower price in a reply that arrived after the offer went final (can be applied with recheck).
@@ -137,6 +144,11 @@ requestsRouter.get(
         .at(-1);
       return m ? { message_id: m.id, unit_price: Number(m.parsed_json.unit_price), received_at: m.created_at } : null;
     };
+    // Prices the supplier wrote that never became an offer (e.g. sent while they were parked for review).
+    const unusedQuotesOf = (s) =>
+      messagesOf(s.id)
+        .filter((m) => m.direction === 'inbound' && !usedMessageIds.has(m.id) && !m.parsed_json?.manual && m.parsed_json?.unit_price != null)
+        .map((m) => ({ message_id: m.id, unit_price: Number(m.parsed_json.unit_price), received_at: m.created_at }));
 
     res.json({
       ...request.rows[0],
@@ -147,6 +159,7 @@ requestsRouter.get(
         messages: messagesOf(s.id),
         offers: offersOf(s.id),
         lower_quote: lowerQuoteOf(s),
+        unused_quotes: unusedQuotesOf(s),
       })),
       events: events.rows,
     });
@@ -239,7 +252,7 @@ requestsRouter.patch(
 async function lockQuotingThread(client, requestId, threadId, allowed = LATE_INVITE_STATUSES) {
   if (!UUID_RE.test(threadId)) throw new NotFoundError('Supplier not found');
   const { rows: [thread] } = await client.query(
-    `SELECT rs.*, s.name AS supplier_name, r.status AS request_status, r.currency
+    `SELECT rs.*, s.name AS supplier_name, r.status AS request_status, r.currency, r.unit
        FROM request_suppliers rs
        JOIN suppliers s ON s.id = rs.supplier_id
        JOIN sourcing_requests r ON r.id = rs.request_id
@@ -327,9 +340,11 @@ requestsRouter.post(
       }
       const body = [
         'Quote entered manually by the buyer:',
-        `Price: ${thread.currency} ${q.unit_price} per unit`,
+        `Price: ${thread.currency} ${q.unit_price} per ${thread.unit}`,
         q.delivery_days ? `Delivery: within ${q.delivery_days} days` : null,
         q.payment_terms ? `Payment terms: ${q.payment_terms}` : null,
+        q.validity_days ? `Valid for: ${q.validity_days} day${q.validity_days === 1 ? '' : 's'}` : null,
+        'Recorded by the buyer; not sent to or confirmed by the supplier.',
       ]
         .filter(Boolean)
         .join('\n');
@@ -341,7 +356,7 @@ requestsRouter.post(
         currency: thread.currency,
         delivery_days: q.delivery_days ?? null,
         payment_terms: q.payment_terms ?? null,
-        validity_days: null,
+        validity_days: q.validity_days ?? null,
         is_final: false,
         accepts_counter: false,
       };
@@ -416,6 +431,8 @@ requestsRouter.post(
     const { id } = req.params;
     await withTransaction(async (client) => {
       await transition(client, id, RequestStatus.DISCOVERING, { meta: { reason: 'manual_rediscover' } });
+      // "Search again" means fresh web results, not the cached ones from the last attempt.
+      await client.query('UPDATE sourcing_requests SET discovery_cache = NULL WHERE id = $1', [id]);
       // Drop suppliers that were never contacted; contacted ones keep their history.
       await client.query(`DELETE FROM request_suppliers WHERE request_id = $1 AND status = 'PENDING'`, [id]);
     });
