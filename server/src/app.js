@@ -1,6 +1,7 @@
 import cors from 'cors';
 import express from 'express';
 import { ZodError } from 'zod';
+import { requirePassword } from './auth.js';
 import { config } from './config.js';
 import { pool } from './db/pool.js';
 import { HttpError } from './errors.js';
@@ -14,11 +15,13 @@ export function createApp() {
   const app = express();
   app.use(cors({ origin: config.corsOrigin }));
   app.use(express.json({ limit: '1mb' }));
+  app.use('/api', requirePassword(config.appPassword));
 
   app.get('/api/health', async (req, res) => {
     await pool.query('SELECT 1');
     res.json({
       ok: true,
+      passwordRequired: Boolean(config.appPassword),
       aiMode: config.ai.mode,
       aiProvider: config.ai.mode === 'live' ? config.ai.provider : 'mock',
       aiModel: config.ai.mode === 'live' ? (config.ai.provider === 'gemini' ? config.ai.gemini.model : config.ai.model) : null,
@@ -29,6 +32,9 @@ export function createApp() {
       searchProvider: config.ai.mode === 'live' ? (config.ai.provider === 'anthropic' ? 'claude-web-search' : config.search.provider) : 'none',
     });
   });
+
+  // Lets the web app check a password before showing anything (the middleware above does the work).
+  app.get('/api/auth/check', (req, res) => res.json({ ok: true }));
 
   app.use('/api/requests', requestsRouter);
   app.use('/api/webhooks', webhooksRouter);

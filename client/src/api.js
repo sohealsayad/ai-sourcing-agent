@@ -6,6 +6,28 @@ export class ApiError extends Error {
   }
 }
 
+// Shared password for a deployed app (see APP_PASSWORD on the server). Storage may be unavailable.
+const PASSWORD_KEY = 'sourcing-desk:password';
+let memoryPassword = '';
+export function getPassword() {
+  try {
+    return localStorage.getItem(PASSWORD_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+export function setPassword(value) {
+  try {
+    if (value) localStorage.setItem(PASSWORD_KEY, value);
+    else localStorage.removeItem(PASSWORD_KEY);
+  } catch {
+    // ignore: the password then lasts only until the page reloads
+  }
+  memoryPassword = value;
+}
+/** Fired when the server asks for the password, so the app can show the sign-in screen. */
+export const AUTH_REQUIRED_EVENT = 'sourcing-desk:auth-required';
+
 const API_DOWN = 'Cannot reach the API server (port 4000). Is `npm run dev` running? Check its terminal for errors.';
 
 async function request(path, options = {}) {
@@ -13,12 +35,13 @@ async function request(path, options = {}) {
   try {
     res = await fetch(`/api${path}`, {
       ...options,
-      headers: { 'Content-Type': 'application/json', ...options.headers },
+      headers: { 'Content-Type': 'application/json', 'X-App-Password': memoryPassword || getPassword(), ...options.headers },
     });
   } catch {
     throw new ApiError(0, { error: API_DOWN });
   }
   const body = await res.json().catch(() => null);
+  if (res.status === 401 && body?.passwordRequired) window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
   // The API always answers with JSON; a non-JSON error comes from the Vite proxy when the API is down.
   if (!res.ok) throw new ApiError(res.status, body ?? { error: res.status >= 500 ? API_DOWN : undefined });
   return body;
@@ -28,6 +51,7 @@ const post = (path, data) => request(path, { method: 'POST', body: JSON.stringif
 
 export const api = {
   health: () => request('/health'),
+  checkPassword: (password) => request('/auth/check', { headers: { 'X-App-Password': password } }),
   listRequests: () => request('/requests'),
   getRequest: (id) => request(`/requests/${id}`),
   createRequest: (data) => post('/requests', data),

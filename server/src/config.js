@@ -39,6 +39,9 @@ export function buildConfig(env) {
     corsOrigin: env.CORS_ORIGIN || 'http://localhost:5173',
     databaseUrl: env.DATABASE_URL,
     runWorker: env.RUN_WORKER !== 'false',
+    production: env.NODE_ENV === 'production',
+    // Shared password for the API (and so the web app). Empty = open, which is fine on localhost only.
+    appPassword: env.APP_PASSWORD || '',
 
     ai: {
       mode: aiMode,
@@ -145,6 +148,15 @@ export function buildConfig(env) {
     if (missing.length) {
       errors.push(`INBOUND_PROVIDER=imap signs in with the SMTP account and requires ${missing.join(', ')}.`);
     }
+  }
+
+  // A public deployment runs live only, and never without a password: anyone with the URL could
+  // otherwise send real emails and spend API credits.
+  if (cfg.production) {
+    if (aiMode !== 'live') errors.push('NODE_ENV=production requires AI_MODE=live (mock mode is for local runs and tests).');
+    if (transport !== 'smtp') errors.push('NODE_ENV=production requires EMAIL_TRANSPORT=smtp.');
+    if (cfg.simulation.suppliers) errors.push('NODE_ENV=production requires SIMULATE_SUPPLIERS=false.');
+    if (!cfg.appPassword) errors.push('NODE_ENV=production requires APP_PASSWORD (the shared password for the web app).');
   }
 
   if (errors.length) throw new Error(`Invalid configuration:\n  - ${errors.join('\n  - ')}`);

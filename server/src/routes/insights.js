@@ -17,7 +17,9 @@ insightsRouter.get(
               COUNT(rs.id) FILTER (WHERE rs.selected)::int AS contacted,
               COUNT(rs.id) FILTER (WHERE rs.current_offer_price IS NOT NULL)::int AS quoted,
               COUNT(rs.id) FILTER (WHERE rs.status = 'WON')::int AS won,
-              MAX(rs.updated_at) AS last_activity
+              MAX(rs.updated_at) AS last_activity,
+              (ARRAY_AGG(rs.request_id ORDER BY rs.updated_at DESC))[1] AS latest_request_id,
+              (ARRAY_AGG(rs.id ORDER BY rs.updated_at DESC))[1] AS latest_thread_id
          FROM suppliers s
          LEFT JOIN request_suppliers rs ON rs.supplier_id = s.id
         GROUP BY s.id

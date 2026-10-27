@@ -42,7 +42,7 @@ export default function QuotesPage() {
             </select>
             <div className="relative w-60">
               <Icon name="search" className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-slate-400" />
-              <input type="search" className="field-input pl-9" placeholder="Search supplier" aria-label="Search quotes" value={search} onChange={(e) => setSearch(e.target.value)} />
+              <input type="search" className="field-input pl-9!" placeholder="Search supplier" aria-label="Search quotes" value={search} onChange={(e) => setSearch(e.target.value)} />
             </div>
           </div>
         </div>
@@ -58,16 +58,17 @@ export default function QuotesPage() {
         {data && !rows.length && <EmptyState icon="receipt" title="No quotes yet" description="Quotes appear here as soon as suppliers reply with a price." />}
 
         {rows.length > 0 && (
-          <table className="w-full table-fixed">
+          <div className="overflow-x-auto">
+          <table className="w-full min-w-[1040px] table-fixed">
             <colgroup>
-              <col />
-              <col className="w-48" />
-              <col className="w-40" />
-              <col className="w-24" />
-              <col className="w-56" />
-              <col className="w-28" />
-              <col className="w-36" />
-              <col className="w-40" />
+              <col className="w-[19%]" />
+              <col className="w-[16%]" />
+              <col className="w-[13%]" />
+              <col className="w-[8%]" />
+              <col className="w-[13%]" />
+              <col className="w-[9%]" />
+              <col className="w-[11%]" />
+              <col className="w-[11%]" />
             </colgroup>
             <thead className="border-b border-slate-200/80 bg-slate-50/70">
               <tr>
@@ -86,7 +87,7 @@ export default function QuotesPage() {
                 const vs = ((q.unit_price - q.target_price) / q.target_price) * 100;
                 return (
                   <tr key={q.id} onClick={() => navigate(`/requests/${q.request_id}`)} className="cursor-pointer hover:bg-slate-50/80">
-                    <td className="td truncate font-medium text-slate-900">{q.supplier}</td>
+                    <td className="td truncate font-medium text-slate-900" title={q.supplier}>{q.supplier}</td>
                     <td className="td">
                       <Link to={`/requests/${q.request_id}`} onClick={(e) => e.stopPropagation()} className="block truncate text-slate-700 hover:text-brand-700 hover:underline">
                         {q.commodity}
@@ -125,6 +126,7 @@ export default function QuotesPage() {
               })}
             </tbody>
           </table>
+          </div>
         )}
       </section>
     </div>

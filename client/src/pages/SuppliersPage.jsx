@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import { EmptyState, ErrorState, Icon, PageHeader, Skeleton, StatCard } from '../components/ui.jsx';
 import { formatDateTime } from '../lib/format.js';
@@ -14,6 +15,7 @@ const hostOf = (url) => {
 
 /** Every supplier found or added across requests, with how often it was contacted, quoted and chosen. */
 export default function SuppliersPage() {
+  const navigate = useNavigate();
   const { data, isLoading, error, refetch } = useQuery({ queryKey: ['suppliers'], queryFn: api.listSuppliers });
   const [search, setSearch] = useState('');
 
@@ -42,7 +44,7 @@ export default function SuppliersPage() {
           </div>
           <div className="relative w-72">
             <Icon name="search" className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-slate-400" />
-            <input type="search" className="field-input pl-9" placeholder="Search name, email or location" aria-label="Search suppliers" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <input type="search" className="field-input pl-9!" placeholder="Search name, email or location" aria-label="Search suppliers" value={search} onChange={(e) => setSearch(e.target.value)} />
           </div>
         </div>
 
@@ -57,10 +59,11 @@ export default function SuppliersPage() {
         {data && !rows.length && <EmptyState icon="users" title={data.length ? 'No suppliers match' : 'No suppliers yet'} description={data.length ? 'Try another search.' : 'Suppliers appear here once a request finds or adds them.'} />}
 
         {rows.length > 0 && (
-          <table className="w-full table-fixed">
+          <div className="overflow-x-auto">
+          <table className="w-full min-w-[960px] table-fixed">
             <colgroup>
-              <col />
-              <col className="w-64" />
+              <col className="w-[28%]" />
+              <col className="w-[24%]" />
               <col className="w-24" />
               <col className="w-24" />
               <col className="w-24" />
@@ -80,7 +83,12 @@ export default function SuppliersPage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {rows.map((s) => (
-                <tr key={s.id} className="hover:bg-slate-50/80">
+                <tr
+                  key={s.id}
+                  onClick={() => s.latest_request_id && navigate(`/requests/${s.latest_request_id}?supplier=${s.latest_thread_id}`)}
+                  className={s.latest_request_id ? 'cursor-pointer hover:bg-slate-50/80' : ''}
+                  title={s.latest_request_id ? 'Open this supplier in its latest request' : undefined}
+                >
                   <td className="td">
                     <p className="truncate font-medium text-slate-900" title={s.name}>
                       {s.name}
@@ -92,7 +100,7 @@ export default function SuppliersPage() {
                       {s.email ?? <span className="text-amber-700">No email</span>}
                     </p>
                     {s.website && (
-                      <a href={s.website} target="_blank" rel="noreferrer" className="truncate text-xs text-slate-500 hover:underline">
+                      <a href={s.website} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} className="truncate text-xs text-slate-500 hover:underline">
                         {hostOf(s.website)} ↗
                       </a>
                     )}
@@ -106,6 +114,7 @@ export default function SuppliersPage() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </section>
     </div>

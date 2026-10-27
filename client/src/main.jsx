@@ -3,6 +3,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App.jsx';
+import PasswordGate from './components/PasswordGate.jsx';
 import { toast } from './components/Toaster.jsx';
 import './index.css';
 
@@ -28,7 +29,9 @@ ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <App />
+        <PasswordGate>
+          <App />
+        </PasswordGate>
       </BrowserRouter>
     </QueryClientProvider>
   </React.StrictMode>,

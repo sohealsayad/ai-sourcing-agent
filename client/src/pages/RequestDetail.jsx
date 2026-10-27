@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api.js';
 import AllowlistPanel from '../components/AllowlistPanel.jsx';
 import ApprovalPanel from '../components/ApprovalPanel.jsx';
@@ -136,8 +136,13 @@ export default function RequestDetail() {
   // null = untouched, which means "every supplier with an email".
   const [selection, setSelection] = useState(null);
   // Supplier shown in the side panel (request_suppliers id), or null when closed.
-  const [panelId, setPanelId] = useState(null);
-  const closePanel = useCallback(() => setPanelId(null), []);
+  // ?supplier=<id> (from the Suppliers page) opens that panel on arrival.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [panelId, setPanelId] = useState(() => searchParams.get('supplier'));
+  const closePanel = useCallback(() => {
+    setPanelId(null);
+    setSearchParams({}, { replace: true });
+  }, [setSearchParams]);
   const [showAllowlist, setShowAllowlist] = useState(false);
   const [hideNoEmailHint, setHideNoEmailHint] = useState(false);
 
